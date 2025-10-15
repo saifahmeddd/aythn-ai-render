@@ -1,5 +1,9 @@
 import logging
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 DEBUG = os.getenv("DEBUG_MODE", "True").lower() == "true"
 HOST = os.getenv("APPLICATION_HOST")

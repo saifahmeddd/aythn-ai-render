@@ -1,0 +1,20 @@
+# Web Framework
+Flask
+flask-cors
+
+# Environment Configuration
+python-dotenv
+
+# LangChain Framework
+langchain
+langchain-core
+langchain-openai
+langchain-community
+langchain-postgres
+
+# Database
+sqlalchemy
+psycopg2-binary
+
+# OpenAI API
+openai

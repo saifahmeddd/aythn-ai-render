@@ -4,14 +4,19 @@ import config
 import routes
 from dotenv import load_dotenv
 from flask_cors import CORS
+from database.models import initialize_database
 
 from config import FRONTEND_URL
 
 # Load environment variables
 load_dotenv()
 
+# Initialize database
+initialize_database()
+
 # Initialize Flask app
 app = Flask(__name__)
+
 
 CORS(app, origins=[FRONTEND_URL])
 
