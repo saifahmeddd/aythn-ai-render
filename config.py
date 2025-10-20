@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEBUG = os.getenv("DEBUG_MODE", "True").lower() == "true"
-HOST = os.getenv("APPLICATION_HOST")
+HOST = os.getenv("HOST")
 PORT = int(os.getenv("APPLICATION_PORT"))
 FRONTEND_URL = os.getenv("FRONTEND_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
