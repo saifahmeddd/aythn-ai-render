@@ -1,0 +1,57 @@
+{
+    "domains": {
+      "real_estate": {
+        "questions": [
+          {
+            "question": "Are you interested in buying or renting a property?",
+            "answers": {
+              "buy": {
+                "response": "Great! What type of property are you looking for?",
+                "next_route": "/property-type"
+              },
+              "rent": {
+                "response": "Got it! What city are you looking to rent in?",
+                "next_route": "/rent-location"
+              }
+            }
+          },
+          {
+            "question": "What is your budget range?",
+            "answers": {
+              "low": {
+                "response": "We have affordable options starting at $100k.",
+                "next_route": "/affordable-options"
+              },
+              "medium": {
+                "response": "Let’s explore some mid-range options.",
+                "next_route": "/mid-range"
+              },
+              "high": {
+                "response": "Perfect, I’ll show you premium properties.",
+                "next_route": "/premium"
+              }
+            }
+          }
+        ]
+      },
+      "education": {
+        "questions": [
+          {
+            "question": "Are you a student or a parent?",
+            "answers": {
+              "student": {
+                "response": "What course are you interested in?",
+                "next_route": "/courses"
+              },
+              "parent": {
+                "response": "Which grade level are you looking for?",
+                "next_route": "/grade-levels"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+  
+  
