@@ -170,6 +170,184 @@ def run_agent(user_input: str, lead_id: int, max_number_of_messages: int=5):
 
 
 
+def check_subscription_status():
+    """
+    Check if the webhook is subscribed to leadgen service.
+    If no subscription exists, create one automatically.
+    
+    Returns:
+        dict: Response payload from Facebook API containing subscription details
+    """
+    try:
+        app_id = config.META_APP_ID
+        access_token = config.META_ACCESS_TOKEN
+
+        # First, check if subscription exists
+        url = f"https://graph.facebook.com/v24.0/{app_id}/subscriptions"
+        params = {
+            "access_token": access_token
+        }
+
+        resp = requests.get(url, params=params)
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {"text": resp.text}
+
+        # Subscription exists, return parsed subscription info and raw payload for visibility
+        return {
+            "subscription_status": "active",
+            "subscription_data": payload
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
+def subscribe_webhook():
+    """
+    Subscribe to Facebook Page Webhook for leadgen events.
+    
+    Returns:
+        dict: Response payload from Facebook API
+    """
+    try:
+        app_id = config.META_APP_ID
+        callback_url = config.WEBHOOK_CALLBACK_URL
+        verify_token = config.WEBHOOK_VERIFY_TOKEN
+        fields = "leadgen"
+        access_token = config.META_ACCESS_TOKEN
+
+        # Validate required configuration
+        missing = []
+        if not app_id:
+            missing.append("META_APP_ID")
+        if not access_token:
+            missing.append("META_ACCESS_TOKEN")
+        if not callback_url:
+            missing.append("WEBHOOK_CALLBACK_URL")
+        if not verify_token:
+            missing.append("WEBHOOK_VERIFY_TOKEN")
+        if missing:
+            return {
+                "error": "Missing required configuration",
+                "missing": missing
+            }
+
+        url = f"https://graph.facebook.com/v24.0/{app_id}/subscriptions"
+        data = {
+            "object": "page",
+            "callback_url": callback_url,
+            "verify_token": verify_token,
+            "fields": fields,
+            "access_token": access_token,
+        }
+
+        try:
+            resp = requests.post(url, data=data)
+            payload = resp.json()
+        except Exception:
+            return{
+                "error": resp.text
+            }
+
+        response= check_subscription_status()
+        if response.get("error"):
+            return {
+                "error": response.get("error")
+            }
+        else:
+            return {
+                "subscription_status": "active",
+                "message": "Subscription active",
+                "subscription_data": payload,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def fetch_lead_details(lead_id: int):
+    """
+    Fetch the full lead info (name, email, phone, etc.) from Graph API
+    """
+    url = f"https://graph.facebook.com/v24.0/{lead_id}"
+    params = {
+        "access_token": config.PAGE_ACCESS_TOKEN  # Page access token with leads_retrieval permission
+    }
+    resp = requests.get(url, params=params)
+    if resp.status_code == 200:
+        return resp.json()
+    else:
+        print("Failed to fetch lead:", resp.text)
+        return None
+
+
+def save_lead_to_db(lead_data):
+    """
+    Extracts lead fields and stores them in your Leads table
+    """
+    session = None
+    try:
+        field_data = {item["name"]: item["values"][0] for item in lead_data["field_data"]}
+        name = field_data.get("full_name")
+        email = field_data.get("email")
+
+        # Create engine and session
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        
+        # Create Lead model dynamically
+        Base = declarative_base()
+        lead_model = models.create_leads_model('leads', Base)
+        
+        new_lead = lead_model(
+            name=name,
+            email=email,
+            eligible=None,
+            created_at=datetime.now()
+        )
+        session.add(new_lead)
+        session.commit()
+        return new_lead
+    except Exception as e:
+        print(f"Error saving lead: {e}")
+        if session:
+            session.rollback()
+        return None
+    finally:
+        if session:
+            session.close()
+
+def store_lead_data(data: dict):
+    """
+    Store lead data in the database.
+    """
+    try:
+            # Loop through entries and changes
+            for entry in data.get("entry", []):
+                for change in entry.get("changes", []):
+                    if change.get("field") == "leadgen":
+                        lead_id = change["value"]["leadgen_id"]
+                        print(f"Fetching lead details for ID: {lead_id}")
+
+                        lead_data = fetch_lead_details(lead_id)
+
+                        if lead_data:
+                            new_lead = save_lead_to_db(lead_data)
+                            if new_lead:
+                                print(f"Lead saved successfully: {new_lead.name} ({new_lead.email})")
+                            else:
+                                print("Failed to save lead")
+
+            return {"message": "Lead data stored successfully"}
+    except Exception as e:
+        print(f"Error in store_lead_data: {e}")
+        return {"error": str(e)}
+
+
+def get_all_leads():
     """
     Fetch all leads from the database.
     """

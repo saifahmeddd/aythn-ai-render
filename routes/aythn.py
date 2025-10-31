@@ -31,6 +31,33 @@ def run_agent():
         return jsonify({"error": str(e)}), 500
 
 
+@AYTHN_BLUEPRINT.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    """
+    Endpoint to handle webhook events.
+    For GET: Facebook webhook verification
+    For POST: Facebook webhook events
+    """
+    if request.method == "GET":
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+
+        # Verify the token and respond with the challenge
+        if mode == "subscribe" and token == config.WEBHOOK_VERIFY_TOKEN and challenge:
+            return Response(challenge, mimetype=TEXT_PLAIN), 200
+        else:
+            return Response("Verification failed", mimetype=TEXT_PLAIN), 403
+
+    if request.method == "POST":
+        data = request.get_json()
+        print("Received webhook:", data)
+        AythnView.store_lead_data(data)
+        return Response("EVENT_RECEIVED", mimetype=TEXT_PLAIN), 200
+
+
+@AYTHN_BLUEPRINT.route("/leads", methods=["GET"])
+def list_leads():
     """
     Return all leads stored in the database.
     """
