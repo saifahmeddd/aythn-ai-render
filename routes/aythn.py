@@ -67,3 +67,39 @@ def list_leads():
         return jsonify(result), status
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@AYTHN_BLUEPRINT.route("/conversation", methods=["POST"])
+def lead_conversation():
+    """
+    Endpoint to retrieve conversation history for a specific lead.
+    """    
+    try:
+        data = request.get_json()
+        lead_id = data.get("lead_id")
+        conversation = AythnView.get_conversation(lead_id)
+        status = 200 if "error" not in conversation else 500
+        return jsonify(conversation), status
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+@AYTHN_BLUEPRINT.route("/webhook/delete-user-data", methods=["POST"])
+def delete_user_data():
+    """
+    Endpoint to handle user data deletion requests.
+    """
+    try:
+        data = request.get_json()
+        lead_id = data.get("lead_id")
+
+        if not lead_id:
+            return jsonify({"error": "User ID is required"}), 400
+
+        result = AythnView.delete_user_data(lead_id)
+        status = 200 if "error" not in result else 500
+        return jsonify(result), status
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

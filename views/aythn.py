@@ -279,7 +279,38 @@ def fetch_lead_details(lead_id: int):
     if resp.status_code == 200:
         return resp.json()
     else:
-        print("Failed to fetch lead:", resp.text)
+        error_data = resp.json() if resp.text else {}
+        error_msg = error_data.get("error", {}).get("message", resp.text)
+        error_code = error_data.get("error", {}).get("code", resp.status_code)
+        print(f"Failed to fetch lead ID {lead_id}: [{error_code}] {error_msg}")
+        return None
+
+
+def send_initial_greeting(lead_id: int, lead_name: str = None):
+    """
+    Send an initial greeting message to a new lead to start the conversation.
+    This initializes the chat session and sends a greeting from the agent.
+    
+    Args:
+        lead_id (int): The ID of the lead in the database
+        lead_name (str, optional): The name of the lead for personalization
+    """
+    try:
+        # Send a simple greeting message as user input to trigger agent's response
+        # The agent will respond naturally with a friendly greeting based on the system prompt
+        initial_user_message = "Hello"
+        
+        # Use run_agent to initialize the conversation and get agent's greeting response
+        result = run_agent(initial_user_message, lead_id)
+        
+        if result and result.get('text'):
+            print(f"Initial greeting sent to lead {lead_id} (name: {lead_name}): {result.get('text', 'No response')[:100]}...")
+        else:
+            print(f"Warning: No response received for initial greeting to lead {lead_id}")
+        
+        return result
+    except Exception as e:
+        print(f"Error sending initial greeting to lead {lead_id}: {e}")
         return None
 
 
@@ -310,19 +341,23 @@ def save_lead_to_db(lead_data):
         )
         session.add(new_lead)
         session.commit()
-        return new_lead
+        
+        # Get the lead ID after commit (it's auto-generated)
+        lead_db_id = new_lead.id
+        
+        return new_lead, lead_db_id
     except Exception as e:
         print(f"Error saving lead: {e}")
         if session:
             session.rollback()
-        return None
+        return None, None
     finally:
         if session:
             session.close()
 
 def store_lead_data(data: dict):
     """
-    Store lead data in the database.
+    Store lead data in the database and automatically send initial greeting.
     """
     try:
             # Loop through entries and changes
@@ -332,14 +367,32 @@ def store_lead_data(data: dict):
                         lead_id = change["value"]["leadgen_id"]
                         print(f"Fetching lead details for ID: {lead_id}")
 
-                        lead_data = fetch_lead_details(lead_id)
+                        # lead_data = fetch_lead_details(lead_id)
+                        # mock data for leads
+                        lead_data={
+                            "id": lead_id,
+                            "field_data": [
+                                {"name": "full_name", "values": ["John Doe"]},
+                                {"name": "email", "values": ["john@gmail.com"]}
+                            ]
+                        }
 
                         if lead_data:
-                            new_lead = save_lead_to_db(lead_data)
-                            if new_lead:
+                            new_lead, lead_db_id = save_lead_to_db(lead_data)
+                            if new_lead and lead_db_id:
                                 print(f"Lead saved successfully: {new_lead.name} ({new_lead.email})")
+                                
+                                # Automatically send initial greeting to start conversation
+                                print(f"Sending initial greeting to lead {lead_db_id}...")
+                                greeting_result = send_initial_greeting(lead_db_id, new_lead.name)
+                                if greeting_result:
+                                    print(f"Initial greeting sent successfully to lead {lead_db_id}")
+                                else:
+                                    print(f"Failed to send initial greeting to lead {lead_db_id}")
                             else:
-                                print("Failed to save lead")
+                                print("Failed to save lead to database")
+                        else:
+                            print(f"Skipping lead ID {lead_id} - could not fetch details (may be invalid or lack permissions)")
 
             return {"message": "Lead data stored successfully"}
     except Exception as e:
@@ -378,3 +431,109 @@ def get_all_leads():
     finally:
         if session:
             session.close()
+
+
+def delete_user_data(user_id: str):
+    """
+    Delete user data associated with the given user_id from the database.
+    """
+    session = None
+    session_id = str(user_id)
+    chat_history_table = "messages"
+
+    engine = create_engine(PG_CONN_STRING)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    try:
+        Base = declarative_base()
+        message_model = models.create_message_model(chat_history_table, Base)
+
+        lead_to_delete = session.query(message_model).filter(
+            message_model.session_id == session_id
+        ).first()
+        if lead_to_delete:
+            session.delete(lead_to_delete)
+            session.commit()
+            return {"message": f"User data for {user_id} deleted successfully."}
+        else:
+            return {"message": f"No user data found for {user_id}."}
+    except Exception as e:
+        print(f"Error deleting user data: {e}")
+        if session:
+            session.rollback()
+        return {"error": str(e)}
+    finally:
+        if session:
+            session.close()
+
+def get_conversation(lead_id: int):
+    """
+    Retrieve conversation history for a specific lead from the messages table.
+    
+    Args:
+        lead_id (int): The ID of the lead to retrieve conversation for.
+    
+    Returns:
+        dict: A dictionary containing the conversation messages with timestamps or an error message.
+    """
+    try:
+        # Query the database directly to get messages with timestamps
+        session_id = str(lead_id)
+        chat_history_table = "messages"
+        
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        
+        try:
+            Base = declarative_base()
+            message_model = models.create_message_model(chat_history_table, Base)
+            
+            # Query messages with timestamps, ordered by created_at
+            db_messages = session.query(message_model).filter(
+                message_model.session_id == session_id
+            ).order_by(message_model.created_at.asc()).all()
+            
+            # Convert database messages to conversation format
+            conversation_messages = []
+            message_converter = MessageConverterWithDateTime(chat_history_table)
+            
+            for idx, db_msg in enumerate(db_messages):
+                try:
+                    # Convert JSON message back to LangChain message object
+                    langchain_message = message_converter.from_sql_model(db_msg)
+                    
+                    # Skip the first message if it's a user message with "Hello"
+                    if idx == 0:
+                        continue  # Skip this message
+                    
+                    # Extract message information
+                    message_dict = {
+                        "type": langchain_message.__class__.__name__,
+                        "content": langchain_message.content,
+                        "created_at": db_msg.created_at.isoformat() if db_msg.created_at else None,
+                    }
+                    
+                    # Add additional metadata if available
+                    if hasattr(langchain_message, 'additional_kwargs'):
+                        message_dict["additional_kwargs"] = langchain_message.additional_kwargs
+                    
+                    conversation_messages.append(message_dict)
+                except Exception as e:
+                    print(f"Error parsing message {db_msg.id}: {e}")
+                    continue
+            
+        finally:
+            session.close()
+        
+        return {
+            "lead_id": lead_id,
+            "messages": conversation_messages,
+            "message_count": len(conversation_messages)
+        }
+        
+    except Exception as e:
+        print(f"Error retrieving conversation for lead {lead_id}: {e}")
+        return {"error": str(e)}
+

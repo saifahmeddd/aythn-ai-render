@@ -29,37 +29,17 @@ for blueprint in vars(routes).values():
     if isinstance(blueprint, Blueprint):
         app.register_blueprint(blueprint, url_prefix=f'{blueprint.url_prefix}')
 
-
-def _subscribe_webhook_on_startup():
-    """
-    Attempt to check and create/refresh the Facebook Webhook subscription at app startup.
-    Uses the check_subscription_status service function which handles both checking and subscribing.
-    Safe to run repeatedly; failures are logged.
-    """
+def delayed_subscribe():
+    time.sleep(5)
     try:
-        app_id = config.META_APP_ID
-        access_token = config.META_ACCESS_TOKEN
-
-        if not (app_id and access_token):
-            print("Webhook startup: Missing META_APP_ID or META_ACCESS_TOKEN - skipping webhook setup")
-            return  # Missing configuration; skip silently
-
-        # Call the service function which checks and creates subscription if needed
         result = subscribe_webhook()
-
         if result.get("error"):
             print(f"Webhook setup failed: {result}")
         else:
             print("Webhook setup completed")
             print(result)
-            
     except Exception as e:
         print(f"Webhook subscribe exception: {e}")
-
-
-def delayed_subscribe():
-    time.sleep(5)
-    _subscribe_webhook_on_startup()
 
 if __name__ == "__main__":
     print(f"Application running on http://{config.HOST}:{config.PORT}")
