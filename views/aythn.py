@@ -702,6 +702,47 @@ def get_all_leads():
             session.close()
 
 
+def get_leads_eligibility():
+    """
+    Fetch all lead IDs and their eligibility status.
+    Returns a simplified list with only leadgen_id and eligible status.
+    """
+    session = None
+    try:
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+
+        Base = declarative_base()
+        lead_model = models.create_leads_model('leads', Base)
+
+        # Query only leadgen_id and eligible fields for efficiency
+        leads = session.query(lead_model.leadgen_id, lead_model.eligible).all()
+
+        # Format results
+        leads_eligibility = [
+            {
+                "leadgen_id": leadgen_id,
+                "eligible": eligible
+            }
+            for leadgen_id, eligible in leads
+        ]
+
+        return {
+            "leads_eligibility": leads_eligibility,
+            "total_leads": len(leads_eligibility),
+            "eligible_count": sum(1 for _, eligible in leads if eligible is True),
+            "ineligible_count": sum(1 for _, eligible in leads if eligible is False),
+            "pending_count": sum(1 for _, eligible in leads if eligible is None)
+        }
+    except Exception as e:
+        print(f"Error fetching leads eligibility: {e}")
+        return {"error": str(e)}
+    finally:
+        if session:
+            session.close()
+
+
 def delete_user_data(user_id: str):
     """
     Delete user data associated with the given user_id from the database.

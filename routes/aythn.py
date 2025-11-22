@@ -69,6 +69,20 @@ def list_leads():
         return jsonify({"error": str(e)}), 500
 
 
+@AYTHN_BLUEPRINT.route("/leads/eligibility", methods=["GET"])
+def leads_eligibility():
+    """
+    Return all lead IDs and their eligibility status.
+    Returns a simplified list with leadgen_id and eligible status, plus summary statistics.
+    """
+    try:
+        result = AythnView.get_leads_eligibility()
+        status = 200 if "error" not in result else 500
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @AYTHN_BLUEPRINT.route("/conversation", methods=["POST"])
 def lead_conversation():
     """
