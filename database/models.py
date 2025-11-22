@@ -17,9 +17,9 @@ def create_leads_model(table_name, dynamic_base):
     """
     class Lead(dynamic_base):
         __tablename__ = table_name
-        id = Column(Integer, primary_key=True)
-        name = Column(Text)
-        email = Column(Text)
+        leadgen_id = Column(String, primary_key=True)  # Facebook leadgen_id from webhook (primary key)
+        name = Column(Text, nullable=True)
+        email = Column(Text, nullable=True)
         eligible = Column(Boolean)
         created_at = Column(DateTime)
 
@@ -43,7 +43,7 @@ def create_message_model(table_name, dynamic_base):
     class Message(dynamic_base):
         __tablename__ = table_name
         id = Column(Integer, primary_key=True)
-        lead_id = Column(Integer, ForeignKey('leads.id'))
+        lead_id = Column(String, ForeignKey('leads.leadgen_id'))  # Foreign key to leads.leadgen_id
         # Required by LangChain's SQLChatMessageHistory
         session_id = Column(String, index=True)
         message = Column(Text)

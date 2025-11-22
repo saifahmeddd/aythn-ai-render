@@ -7,11 +7,13 @@
             "answers": {
               "buy": {
                 "response": "Great! What type of property are you looking for?",
-                "next_route": "/property-type"
+                "next_route": "/property-type",
+                "eligible": true
               },
               "rent": {
                 "response": "Got it! What city are you looking to rent in?",
-                "next_route": "/rent-location"
+                "next_route": "/rent-location",
+                "eligible": true
               }
             }
           },
@@ -20,19 +22,30 @@
             "answers": {
               "low": {
                 "response": "We have affordable options starting at $100k.",
-                "next_route": "/affordable-options"
+                "next_route": "/affordable-options",
+                "eligible": true
               },
               "medium": {
-                "response": "Let’s explore some mid-range options.",
-                "next_route": "/mid-range"
+                "response": "Let's explore some mid-range options.",
+                "next_route": "/mid-range",
+                "eligible": true
               },
               "high": {
-                "response": "Perfect, I’ll show you premium properties.",
-                "next_route": "/premium"
+                "response": "Perfect, I'll show you premium properties.",
+                "next_route": "/premium",
+                "eligible": true
               }
             }
           }
-        ]
+        ],
+        "eligibility_rules": {
+          "description": "For real estate, leads are eligible if they show interest in buying or renting and have a budget range",
+          "required_answers": ["buy_or_rent", "budget_range"],
+          "combination_rules": {
+            "buy + any_budget": true,
+            "rent + any_budget": true
+          }
+        }
       },
       "education": {
         "questions": [
@@ -41,16 +54,32 @@
             "answers": {
               "student": {
                 "response": "What course are you interested in?",
-                "next_route": "/courses"
+                "next_route": "/courses",
+                "eligible": true
               },
               "parent": {
                 "response": "Which grade level are you looking for?",
-                "next_route": "/grade-levels"
+                "next_route": "/grade-levels",
+                "eligible": true
               }
             }
           }
-        ]
+        ],
+        "eligibility_rules": {
+          "description": "For education, leads are eligible if they are either a student or a parent",
+          "required_answers": ["student_or_parent"],
+          "combination_rules": {
+            "student": true,
+            "parent": true
+          }
+        }
       }
+    },
+    "global_eligibility_rules": {
+      "description": "Global rules that apply across all domains",
+      "minimum_answers_required": 1,
+      "default_eligible": false,
+      "eligibility_logic": "A lead is eligible if they provide at least one answer that has eligible=true, and meet domain-specific requirements"
     }
   }
   

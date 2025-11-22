@@ -84,6 +84,25 @@ def lead_conversation():
         return jsonify({"error": str(e)}), 500
 
 
+@AYTHN_BLUEPRINT.route("/conversation/finalize-eligibility", methods=["POST"])
+def finalize_eligibility():
+    """
+    Endpoint to finalize and update eligibility when conversation ends.
+    Evaluates all conversation messages and updates the lead's eligible flag.
+    """
+    try:
+        data = request.get_json()
+        leadgen_id = data.get("leadgen_id") or data.get("lead_id")
+        
+        if not leadgen_id:
+            return jsonify({"error": "Leadgen ID is required"}), 400
+        
+        result = AythnView.evaluate_final_eligibility(leadgen_id)
+        status = 200 if "error" not in result else 500
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @AYTHN_BLUEPRINT.route("/webhook/delete-user-data", methods=["POST"])
 def delete_user_data():

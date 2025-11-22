@@ -45,14 +45,10 @@ class MessageConverterWithDateTime(BaseMessageConverter):
             Any: The SQL model object representing the converted message.
         """
         current_time = datetime.now()
-        # Our app uses session_id = str(lead_id), derive lead_id for FK consistency
-        try:
-            derived_lead_id = int(session_id)
-        except (TypeError, ValueError):
-            derived_lead_id = None
+        # Our app uses session_id = str(leadgen_id), use session_id directly as lead_id (FK to leads.leadgen_id)
         return self.model_class(
             session_id=session_id,
-            lead_id=derived_lead_id,
+            lead_id=session_id,  # Use session_id (leadgen_id) directly as foreign key
             message=json.dumps(message_to_dict(message)),
             created_at=current_time,
         )
