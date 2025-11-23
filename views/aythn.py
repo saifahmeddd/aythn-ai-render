@@ -332,6 +332,37 @@ def run_agent(user_input: str, lead_id, max_number_of_messages: int=5):
     Returns:
         str: The agent's response based on the user input.
     """
+    # Check if user is requesting to delete their data
+    if is_deletion_request(user_input):
+        print(f"Deletion request detected for lead {lead_id}. Deleting all data...")
+        try:
+            deletion_result = delete_all_lead_data(str(lead_id))
+            if "error" in deletion_result:
+                return {
+                    "text": "I apologize, but I encountered an error while trying to delete your data. Please contact support if this issue persists.",
+                    "next_route": "/",
+                    "eligible": False,
+                    "conversation_ending": True,
+                    "data_deleted": False
+                }
+            else:
+                return {
+                    "text": "I've successfully deleted all of your data from our system. Your information, conversation history, and account have been permanently removed. Thank you for using our service, and I wish you all the best.",
+                    "next_route": "/",
+                    "eligible": False,
+                    "conversation_ending": True,
+                    "data_deleted": True
+                }
+        except Exception as e:
+            print(f"Error processing deletion request for lead {lead_id}: {e}")
+            return {
+                "text": "I apologize, but I encountered an error while trying to delete your data. Please contact support if this issue persists.",
+                "next_route": "/",
+                "eligible": False,
+                "conversation_ending": True,
+                "data_deleted": False
+            }
+    
     # Initialize message history with lead_id (convert to string for session_id)
     session_id = str(lead_id)
     chat_history_table = "messages"
@@ -743,39 +774,112 @@ def get_leads_eligibility():
             session.close()
 
 
-def delete_user_data(user_id: str):
+def is_deletion_request(user_input: str):
     """
-    Delete user data associated with the given user_id from the database.
+    Check if the user is requesting to delete their data.
+    
+    Args:
+        user_input: The current user input
+    
+    Returns:
+        bool: True if user is requesting data deletion
+    """
+    user_input_lower = user_input.lower().strip()
+    
+    # Keywords that indicate deletion request
+    deletion_keywords = [
+        "delete my data", "delete my information", "delete my account",
+        "delete data", "delete information", "delete account",
+        "remove my data", "remove my information", "remove my account",
+        "remove data", "remove information", "remove account",
+        "erase my data", "erase my information", "erase my account",
+        "erase data", "erase information", "erase account",
+        "forget my data", "forget my information", "forget me",
+        "gdpr delete", "delete everything", "delete all my data",
+        "i want to delete", "i want my data deleted", "delete everything about me"
+    ]
+    
+    # Check if user input contains deletion keywords
+    for keyword in deletion_keywords:
+        if keyword in user_input_lower:
+            return True
+    
+    return False
+
+
+def delete_all_lead_data(leadgen_id: str):
+    """
+    Delete all data associated with a lead from the database.
+    This includes:
+    - All messages in the conversation history
+    - The lead record itself
+    
+    Args:
+        leadgen_id: The Facebook leadgen_id
+    
+    Returns:
+        dict: Result of the deletion operation
     """
     session = None
-    session_id = str(user_id)
+    session_id = str(leadgen_id)
     chat_history_table = "messages"
-
-    engine = create_engine(PG_CONN_STRING)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-
+    
     try:
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        
         Base = declarative_base()
         message_model = models.create_message_model(chat_history_table, Base)
-
-        lead_to_delete = session.query(message_model).filter(
-            message_model.session_id == session_id
+        lead_model = models.create_leads_model('leads', Base)
+        
+        deleted_messages_count = 0
+        deleted_lead = False
+        
+        # Delete all messages for this lead (by session_id and lead_id to be thorough)
+        messages_to_delete = session.query(message_model).filter(
+            (message_model.session_id == session_id) | 
+            (message_model.lead_id == str(leadgen_id))
+        ).all()
+        
+        if messages_to_delete:
+            for msg in messages_to_delete:
+                session.delete(msg)
+                deleted_messages_count += 1
+        
+        # Delete the lead record itself
+        lead_to_delete = session.query(lead_model).filter(
+            lead_model.leadgen_id == str(leadgen_id)
         ).first()
+        
         if lead_to_delete:
             session.delete(lead_to_delete)
-            session.commit()
-            return {"message": f"User data for {user_id} deleted successfully."}
-        else:
-            return {"message": f"No user data found for {user_id}."}
+            deleted_lead = True
+        
+        session.commit()
+        
+        return {
+            "message": f"All data for lead {leadgen_id} has been deleted successfully.",
+            "deleted_messages": deleted_messages_count,
+            "deleted_lead": deleted_lead
+        }
+        
     except Exception as e:
-        print(f"Error deleting user data: {e}")
+        print(f"Error deleting all lead data for {leadgen_id}: {e}")
         if session:
             session.rollback()
         return {"error": str(e)}
     finally:
         if session:
             session.close()
+
+
+def delete_user_data(user_id: str):
+    """
+    Delete user data associated with the given user_id from the database.
+    This is the API endpoint version that calls delete_all_lead_data.
+    """
+    return delete_all_lead_data(user_id)
 
 def get_conversation(lead_id):
     """
