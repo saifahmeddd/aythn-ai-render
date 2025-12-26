@@ -255,7 +255,9 @@ def update_lead_eligibility(leadgen_id: str, is_eligible: bool):
         Session = sessionmaker(bind=engine)
         session = Session()
         
+        # Create Base and models - both must use the same Base for foreign keys to work
         Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
         lead_model = models.create_leads_model('leads', Base)
         
         lead = session.query(lead_model).filter(lead_model.leadgen_id == leadgen_id).first()
@@ -581,6 +583,59 @@ def fetch_lead_details(lead_id: int):
         return None
 
 
+def get_or_create_business(twilio_from_number: str):
+    """
+    Get or create a business record based on Twilio from number.
+    This is a standalone helper function that can be used independently.
+    
+    Args:
+        twilio_from_number: The Twilio phone number (can be with or without whatsapp: prefix)
+    
+    Returns:
+        int: The business ID, or None if there was an error
+    """
+    session = None
+    try:
+        # Clean the phone number (remove whatsapp: prefix)
+        clean_number = twilio_from_number.replace("whatsapp:", "").strip()
+        
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        
+        Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
+        
+        # Try to find existing business
+        business = session.query(business_model).filter(
+            business_model.twilio_from_number == clean_number
+        ).first()
+        
+        if business:
+            return business.id
+        
+        # Create new business if not found
+        new_business = business_model(
+            twilio_from_number=clean_number,
+            created_at=datetime.now()
+        )
+        session.add(new_business)
+        session.commit()
+        session.refresh(new_business)
+        
+        print(f"Created new business with Twilio number: {clean_number} (ID: {new_business.id})")
+        return new_business.id
+        
+    except Exception as e:
+        print(f"Error getting or creating business: {e}")
+        if session:
+            session.rollback()
+        return None
+    finally:
+        if session:
+            session.close()
+
+
 def send_initial_greeting(leadgen_id: str, lead_name: str = None):
     """
     Send an initial greeting message to a new lead to start the conversation.
@@ -616,7 +671,7 @@ def send_initial_greeting(leadgen_id: str, lead_name: str = None):
         return None
 
 
-def save_lead_to_db(leadgen_id: str, lead_data=None):
+def save_lead_to_db(leadgen_id: str, lead_data=None, twilio_from_number: str = None):
     """
     Extracts lead fields and stores them in your Leads table.
     
@@ -624,9 +679,10 @@ def save_lead_to_db(leadgen_id: str, lead_data=None):
         leadgen_id: The Facebook leadgen_id from the webhook (or lead_id from webhook payload)
         lead_data: Optional lead data dict with fields: full_name, email, phone, form_id, created_time
                   OR Facebook API format with field_data array
+        twilio_from_number: Optional Twilio from number to associate lead with a business
     
     Returns:
-        tuple: (new_lead object, leadgen_id string, lead_name, lead_email)
+        tuple: (new_lead object, leadgen_id string, lead_name, lead_email, lead_phone)
     """
     session = None
     try:
@@ -668,15 +724,47 @@ def save_lead_to_db(leadgen_id: str, lead_data=None):
         Session = sessionmaker(bind=engine)
         session = Session()
         
-        # Create Lead model dynamically
+        # Create Base and models - both must use the same Base for foreign keys to work
         Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
         lead_model = models.create_leads_model('leads', Base)
+        
+        # Get or create business if twilio_from_number is provided
+        business_id = None
+        if twilio_from_number:
+            # Clean the phone number (remove whatsapp: prefix)
+            clean_number = twilio_from_number.replace("whatsapp:", "").strip()
+            
+            # Try to find existing business
+            business = session.query(business_model).filter(
+                business_model.twilio_from_number == clean_number
+            ).first()
+            
+            if business:
+                business_id = business.id
+            else:
+                # Create new business if not found
+                new_business = business_model(
+                    twilio_from_number=clean_number,
+                    created_at=datetime.now()
+                )
+                session.add(new_business)
+                session.commit()
+                session.refresh(new_business)
+                business_id = new_business.id
+                print(f"Created new business with Twilio number: {clean_number} (ID: {business_id})")
+            
+            if business_id:
+                print(f"Associating lead {leadgen_id} with business ID: {business_id}")
+            else:
+                print(f"Warning: Could not get/create business for {twilio_from_number}, saving lead without business association")
         
         # Use provided created_time or current time
         created_at = created_time if created_time else datetime.now()
         
         new_lead = lead_model(
             leadgen_id=str(leadgen_id),  # Store Facebook leadgen_id
+            business_id=business_id,  # Associate with business if available
             name=name,  
             email=email,  
             phone=phone, 
@@ -705,9 +793,13 @@ def save_lead_to_db(leadgen_id: str, lead_data=None):
         if session:
             session.close()
 
-def store_lead_data(data: dict):
+def store_lead_data(data: dict, twilio_from_number: str = None):
     """
     Store lead data in the database and automatically send initial greeting.
+    
+    Args:
+        data: Lead data from webhook
+        twilio_from_number: Optional Twilio from number to associate lead with a business
     """
     try:
             # Loop through entries and changes
@@ -718,19 +810,13 @@ def store_lead_data(data: dict):
                         print(f"Fetching lead details for ID: {lead_id}")
                         lead_data = None
 
-                        # lead_data = fetch_lead_details(lead_id)
-                        # mock data for leads
-                        # lead_data={
-                        #     "id": lead_id,
-                        #     "field_data": [
-                        #         {"name": "full_name", "values": ["John Doe"]},
-                        #         {"name": "email", "values": ["john@gmail.com"]}
-                        #     ]
-                        # }
-
-                        # Save lead to database (lead_data is optional)
-                        # Use the Facebook leadgen_id from webhook
-                        new_lead, leadgen_id, lead_name, lead_email, lead_phone = save_lead_to_db(lead_id, lead_data)
+                        # If twilio_from_number not provided, try to get from config
+                        if not twilio_from_number:
+                            twilio_from_number = config.TWILIO_WHATSAPP_FROM
+                        
+                        new_lead, leadgen_id, lead_name, lead_email, lead_phone = save_lead_to_db(
+                            lead_id, lead_data, twilio_from_number
+                        )
                         if new_lead and leadgen_id:
                             print(f"Lead saved successfully: {lead_name} ({lead_email}) with leadgen_id: {leadgen_id}, phone: {lead_phone}")
                             
@@ -763,14 +849,17 @@ def get_all_leads():
         Session = sessionmaker(bind=engine)
         session = Session()
 
+        # Create Base and models - both must use the same Base for foreign keys to work
         Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
         lead_model = models.create_leads_model('leads', Base)
 
         leads = session.query(lead_model).all()
 
         def serialize_lead(lead):
             return {
-                "leadgen_id": lead.leadgen_id,  # Facebook leadgen_id from webhook (primary key)
+                "leadgen_id": lead.leadgen_id,
+                "business_id": lead.business_id,
                 "name": lead.name,
                 "email": lead.email,
                 "phone": lead.phone,
@@ -799,7 +888,9 @@ def get_leads_eligibility():
         Session = sessionmaker(bind=engine)
         session = Session()
 
+        # Create Base and models - both must use the same Base for foreign keys to work
         Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
         lead_model = models.create_leads_model('leads', Base)
 
         # Query only leadgen_id and eligible fields for efficiency
@@ -921,7 +1012,9 @@ def delete_all_lead_data(leadgen_id: str):
         Session = sessionmaker(bind=engine)
         session = Session()
         
+        # Create Base and models - all must use the same Base for foreign keys to work
         Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
         message_model = models.create_message_model(chat_history_table, Base)
         lead_model = models.create_leads_model('leads', Base)
         
@@ -1216,7 +1309,9 @@ def get_lead_by_phone(phone_number):
         Session = sessionmaker(bind=engine)
         session = Session()
         
+        # Create Base and models - both must use the same Base for foreign keys to work
         Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
         lead_model = models.create_leads_model('leads', Base)
         
         # Search for lead by phone number
@@ -1335,7 +1430,7 @@ def receive_message(data=None):
     Receive and route incoming WhatsApp messages.
     
     Args:
-        data: Incoming message data from Twilio webhook with 'Body' and 'From' fields
+        data: Incoming message data from Twilio webhook with 'Body', 'From', and 'To' fields
     
     Returns:
         str: TwiML XML response
@@ -1348,13 +1443,21 @@ def receive_message(data=None):
             return str(response)
         
         incoming_message = data.get('Body', '').strip()
-        from_number = data.get('From', '')
+        from_number = data.get('From', '')  # User's phone number
+        to_number = data.get('To', '')  # Business Twilio number (receiving number)
         
         if not incoming_message:
             response.message("Please send a message.")
             return str(response)
         
-        print(f"Received WhatsApp message from {from_number}: {incoming_message}")
+        print(f"Received WhatsApp message from {from_number} to {to_number}: {incoming_message}")
+        
+        # Get or create business based on the receiving Twilio number
+        business_id = None
+        if to_number:
+            business_id = get_or_create_business(to_number)
+            if business_id:
+                print(f"Message received by business ID: {business_id} (Twilio number: {to_number})")
         
         # Get lead_id from phone number
         leadgen_id, lead_name = get_lead_by_phone(from_number)

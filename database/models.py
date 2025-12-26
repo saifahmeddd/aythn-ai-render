@@ -4,6 +4,26 @@ from sqlalchemy import Column, Integer, Text, DateTime, Boolean, ForeignKey, Str
 import config
 
 
+def create_business_model(table_name, dynamic_base):
+    """
+    Create a business model for a given table name.
+
+    Args:
+        table_name: The name of the table to use.
+        dynamic_base: The base class to use for the model.
+
+    Returns:
+        The model class.
+    """
+    class Business(dynamic_base):
+        __tablename__ = table_name
+        id = Column(Integer, primary_key=True, autoincrement=True)
+        twilio_from_number = Column(String, unique=True, nullable=False)  # Twilio phone number that identifies the business
+        created_at = Column(DateTime)
+
+    return Business
+
+
 def create_leads_model(table_name, dynamic_base):
     """
     Create a leads model for a given table name.
@@ -18,6 +38,7 @@ def create_leads_model(table_name, dynamic_base):
     class Lead(dynamic_base):
         __tablename__ = table_name
         leadgen_id = Column(String, primary_key=True)  # Facebook leadgen_id from webhook (primary key)
+        business_id = Column(Integer, ForeignKey('businesses.id'), nullable=True)  # Foreign key to businesses.id
         name = Column(Text, nullable=True)
         email = Column(Text, nullable=True)
         phone = Column(Text, nullable=True)
@@ -57,13 +78,15 @@ def create_message_model(table_name, dynamic_base):
 def initialize_database():
     """
     Initialize database tables if they don't exist.
-    Creates both 'leads' and 'messages' tables with proper foreign key constraints.
+    Creates 'businesses', 'leads', and 'messages' tables with proper foreign key constraints.
     """
     try:
         engine = create_engine(config.PG_CONN_STRING)
         Base = declarative_base()
 
         # Create models with the same Base instance to ensure FK relationships work
+        # Order matters: create businesses first since leads references it
+        create_business_model('businesses', Base)
         create_leads_model('leads', Base)
         create_message_model('messages', Base)
 
