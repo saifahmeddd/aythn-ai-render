@@ -1,4 +1,7 @@
 from flask import Blueprint, request, jsonify, Response
+from twilio.twiml.messaging_response import MessagingResponse
+
+from config import MAKE_SECRET
 from views import AythnView
 import config
 
@@ -6,6 +9,51 @@ AYTHN_BLUEPRINT = Blueprint("aythn", __name__, url_prefix="/aythn")
 
 # Content type for webhook responses
 TEXT_PLAIN = "text/plain"
+MAKE_SECRET=config.MAKE_SECRET
+
+@AYTHN_BLUEPRINT.route("/new-lead", methods=["POST"])
+def receive_lead():
+    # simple verification via header (set this in Zap)
+    if request.headers.get('X-Make-Secret') != MAKE_SECRET:
+        return jsonify({"error": "forbidden"}), 403
+
+    payload = request.get_json(force=True)
+    print("🔥 New Lead Received: %s", payload)
+    
+    try:
+        # Extract lead_id from payload (could be 'lead_id' or 'leadgen_id')
+        lead_id = payload.get('lead_id') or payload.get('leadgen_id')
+        if not lead_id:
+            return jsonify({"error": "lead_id is required"}), 400
+        
+        # Save lead data to database
+        new_lead, leadgen_id, lead_name, lead_email, lead_phone = AythnView.save_lead_to_db(lead_id, payload)
+        
+        if new_lead and leadgen_id:
+            print(f"Lead saved successfully: {lead_name} ({lead_email}) with leadgen_id: {leadgen_id}, phone: {lead_phone}")
+            
+            # Send WhatsApp template message with first name
+            if lead_phone:
+                print(f"Sending WhatsApp template message to {lead_phone}...")
+                template_result = AythnView.sendWhatsAppTemplate(lead_phone, lead_name)
+                if template_result.get('error'):
+                    print(f"Failed to send WhatsApp template: {template_result.get('error')}")
+                else:
+                    print(f"WhatsApp template sent successfully. SID: {template_result.get('message_sid')}")
+            else:
+                print(f"Warning: No phone number found for lead {leadgen_id}. Cannot send WhatsApp message.")
+            
+            return jsonify({
+                "status": "received",
+                "leadgen_id": leadgen_id,
+                "message": "Lead saved and WhatsApp template sent" if lead_phone else "Lead saved (no phone number)"
+            }), 200
+        else:
+            return jsonify({"error": "Failed to save lead to database"}), 500
+            
+    except Exception as e:
+        print(f"Error processing lead: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @AYTHN_BLUEPRINT.route("/query", methods=["POST"])
@@ -136,3 +184,35 @@ def delete_user_data():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@AYTHN_BLUEPRINT.route("/twilio/whatsapp/receive-message", methods=["POST"])
+def receive_whatsapp_message():
+    """
+    Endpoint to receive messages from WhatsApp via Twilio webhook.
+    Returns TwiML response for Twilio.
+    """
+    try:
+        # Twilio sends form data, not JSON
+        data = {
+            'From': request.form.get('From'),
+            'To': request.form.get('To'),
+            'Body': request.form.get('Body'),
+            'MessageSid': request.form.get('MessageSid'),
+            'AccountSid': request.form.get('AccountSid')
+        }
+        
+        print("Received WhatsApp message:", data)
+        
+        # Process the message using AythnView
+        twiml_response = AythnView.receive_message(data)
+        
+        # Return TwiML response with proper content type
+        return Response(twiml_response, mimetype='text/xml'), 200
+        
+    except Exception as e:
+        print(f"Error processing WhatsApp message: {e}")
+        # Return error TwiML response
+        response = MessagingResponse()
+        response.message("Sorry, there was an error processing your message.")
+        return Response(str(response), mimetype='text/xml'), 200

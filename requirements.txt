@@ -21,3 +21,6 @@ openai
  
 # HTTP
 requests
+
+# Messaging 
+twilio

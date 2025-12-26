@@ -8,16 +8,31 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import json
+import time
 from langchain.chains import LLMChain
 import requests
 from datetime import datetime
 from utils.message_converter import MessageConverterWithDateTime
 import config
 from database import models
+from twilio.rest import Client
+from twilio.twiml.messaging_response import MessagingResponse
+import time
+
 # Load environment variables
 load_dotenv()
 
-# Global variables for reuse (simplified)
+# Twilio Client - Initialize only if credentials are available
+try:
+    if config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN:
+        client = Client(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
+    else:
+        client = None
+        print("Warning: Twilio credentials not configured. WhatsApp messaging will not work.")
+except Exception as e:
+    client = None
+    print(f"Warning: Failed to initialize Twilio client: {e}")
+
 
 def load_domain_qa_data(file_path: str = "domain-q&a.json"):
     """
@@ -91,7 +106,7 @@ domain_knowledge, qa_mapping, eligibility_mapping, eligibility_rules, global_eli
 
 def determine_eligibility(user_input: str, conversation_history: list = None):
     """
-    Determine if a lead is eligible based on their answers.
+    Determine if a lead is eligible based on their answers (user messages only, not agent responses).
     
     Args:
         user_input: The current user input
@@ -102,28 +117,33 @@ def determine_eligibility(user_input: str, conversation_history: list = None):
     """
     user_input_lower = user_input.lower().strip()
     
-    # Check if the current input matches any eligible answer
+    # Check if the current user input matches any eligible answer
     if user_input_lower in eligibility_mapping:
         return eligibility_mapping[user_input_lower]
     
-    # Check for partial matches
+    # Check for partial matches in current user input
     for answer_key, is_eligible in eligibility_mapping.items():
         if answer_key in user_input_lower or user_input_lower in answer_key:
             return is_eligible
     
-    # If no match found and we have conversation history, check previous answers
+    # If no match found and we have conversation history, check previous USER messages only
     if conversation_history:
         eligible_answers_found = []
         for msg in conversation_history:
-            if hasattr(msg, 'content'):
-                msg_content = msg.content.lower().strip()
-                # Check if any previous message matches eligible answers
-                for answer_key, is_eligible in eligibility_mapping.items():
-                    if answer_key in msg_content or msg_content in answer_key:
-                        if is_eligible:
-                            eligible_answers_found.append(True)
+            # Only check HumanMessage (user messages), ignore AI/agent messages
+            if hasattr(msg, '__class__') and 'Human' in msg.__class__.__name__:
+                if hasattr(msg, 'content'):
+                    msg_content = msg.content.lower().strip()
+                    # Skip initial greeting messages
+                    if msg_content == "hello":
+                        continue
+                    # Check if any previous user message matches eligible answers
+                    for answer_key, is_eligible in eligibility_mapping.items():
+                        if answer_key in msg_content or msg_content in answer_key:
+                            if is_eligible:
+                                eligible_answers_found.append(True)
         
-        # If we found at least one eligible answer, return True
+        # If we found at least one eligible answer from user messages, return True
         if eligible_answers_found:
             return True
     
@@ -601,23 +621,47 @@ def save_lead_to_db(leadgen_id: str, lead_data=None):
     Extracts lead fields and stores them in your Leads table.
     
     Args:
-        leadgen_id: The Facebook leadgen_id from the webhook
-        lead_data: Optional lead data from Facebook API
+        leadgen_id: The Facebook leadgen_id from the webhook (or lead_id from webhook payload)
+        lead_data: Optional lead data dict with fields: full_name, email, phone, form_id, created_time
+                  OR Facebook API format with field_data array
     
     Returns:
-        tuple: (new_lead object, leadgen_id string)
+        tuple: (new_lead object, leadgen_id string, lead_name, lead_email)
     """
     session = None
     try:
-        # Extract name and email from lead_data if provided
+        # Extract fields from lead_data if provided
         name = None
         email = None
+        phone = None
+        form_id = None
+        created_time = None
         
         if lead_data and isinstance(lead_data, dict):
-            if "field_data" in lead_data:
+            # Handle direct webhook format: {'full_name': '...', 'email': '...', 'phone': '...', etc.}
+            if "full_name" in lead_data or "email" in lead_data:
+                name = lead_data.get("full_name")
+                email = lead_data.get("email")
+                phone = lead_data.get("phone")
+                form_id = lead_data.get("form_id")
+                created_time_str = lead_data.get("created_time")
+                if created_time_str:
+                    try:
+                        created_time = datetime.fromisoformat(created_time_str.replace('Z', '+00:00'))
+                    except Exception as e:
+                        print(f"Error parsing created_time: {e}")
+                        created_time = datetime.now()
+            # Handle Facebook API format with field_data array
+            elif "field_data" in lead_data:
                 field_data = {item["name"]: item["values"][0] for item in lead_data["field_data"]}
                 name = field_data.get("full_name")
                 email = field_data.get("email")
+                phone = field_data.get("phone")
+        
+        # Mock phone number for test leads (if phone is missing or contains test/dummy data)
+        if not phone or "test" in str(phone).lower() or "dummy" in str(phone).lower() or "<test" in str(phone):
+            phone = "+923007675900"  # Default test phone number
+            print(f"Using mock phone number for test lead: {phone}")
 
         # Create engine and session
         engine = create_engine(PG_CONN_STRING)
@@ -628,12 +672,17 @@ def save_lead_to_db(leadgen_id: str, lead_data=None):
         Base = declarative_base()
         lead_model = models.create_leads_model('leads', Base)
         
+        # Use provided created_time or current time
+        created_at = created_time if created_time else datetime.now()
+        
         new_lead = lead_model(
             leadgen_id=str(leadgen_id),  # Store Facebook leadgen_id
-            name=name,  # Can be None
-            email=email,  # Can be None
+            name=name,  
+            email=email,  
+            phone=phone, 
+            form_id=form_id,
             eligible=None,
-            created_at=datetime.now()
+            created_at=created_at
         )
         session.add(new_lead)
         session.commit()
@@ -644,13 +693,14 @@ def save_lead_to_db(leadgen_id: str, lead_data=None):
         # Extract values before closing session to avoid detached instance errors
         lead_name = new_lead.name
         lead_email = new_lead.email
+        lead_phone = new_lead.phone
         
-        return new_lead, str(leadgen_id), lead_name, lead_email
+        return new_lead, str(leadgen_id), lead_name, lead_email, lead_phone
     except Exception as e:
         print(f"Error saving lead: {e}")
         if session:
             session.rollback()
-        return None, None, None, None
+        return None, None, None, None, None
     finally:
         if session:
             session.close()
@@ -680,17 +730,20 @@ def store_lead_data(data: dict):
 
                         # Save lead to database (lead_data is optional)
                         # Use the Facebook leadgen_id from webhook
-                        new_lead, leadgen_id, lead_name, lead_email = save_lead_to_db(lead_id, lead_data)
+                        new_lead, leadgen_id, lead_name, lead_email, lead_phone = save_lead_to_db(lead_id, lead_data)
                         if new_lead and leadgen_id:
-                            print(f"Lead saved successfully: {lead_name} ({lead_email}) with leadgen_id: {leadgen_id}")
+                            print(f"Lead saved successfully: {lead_name} ({lead_email}) with leadgen_id: {leadgen_id}, phone: {lead_phone}")
                             
-                            # Automatically send initial greeting to start conversation using leadgen_id
-                            print(f"Sending initial greeting to lead {leadgen_id}...")
-                            greeting_result = send_initial_greeting(leadgen_id, lead_name)
-                            if greeting_result:
-                                print(f"Initial greeting sent successfully to lead {leadgen_id}")
+                            # Send WhatsApp template message with first name
+                            if lead_phone:
+                                print(f"Sending WhatsApp template message to {lead_phone}...")
+                                template_result = sendWhatsAppTemplate(lead_phone, lead_name)
+                                if template_result.get('error'):
+                                    print(f"Failed to send WhatsApp template: {template_result.get('error')}")
+                                else:
+                                    print(f"WhatsApp template sent successfully. SID: {template_result.get('message_sid')}")
                             else:
-                                print(f"Failed to send initial greeting to lead {leadgen_id}")
+                                print(f"Warning: No phone number found for lead {leadgen_id}. Cannot send WhatsApp message.")
                         else:
                             print("Failed to save lead to database")
 
@@ -720,6 +773,8 @@ def get_all_leads():
                 "leadgen_id": lead.leadgen_id,  # Facebook leadgen_id from webhook (primary key)
                 "name": lead.name,
                 "email": lead.email,
+                "phone": lead.phone,
+                "form_id": lead.form_id,
                 "eligible": lead.eligible,
                 "created_at": lead.created_at.isoformat() if lead.created_at else None,
             }
@@ -777,6 +832,7 @@ def get_leads_eligibility():
 def is_deletion_request(user_input: str):
     """
     Check if the user is requesting to delete their data.
+    Uses flexible matching to catch variations like "delete this convo", "delete info", etc.
     
     Args:
         user_input: The current user input
@@ -784,9 +840,22 @@ def is_deletion_request(user_input: str):
     Returns:
         bool: True if user is requesting data deletion
     """
+    if not user_input:
+        return False
+    
     user_input_lower = user_input.lower().strip()
     
-    # Keywords that indicate deletion request
+    # Primary deletion action words
+    deletion_actions = ["delete", "remove", "erase", "clear", "wipe", "forget"]
+    
+    # Context words that indicate data/information
+    data_contexts = [
+        "data", "information", "info", "account", "convo", "conversation", 
+        "chat", "messages", "history", "record", "details", "everything",
+        "all", "my data", "my info", "my information", "this", "that"
+    ]
+    
+    # Check for exact phrase matches first (more specific)
     deletion_keywords = [
         "delete my data", "delete my information", "delete my account",
         "delete data", "delete information", "delete account",
@@ -796,12 +865,34 @@ def is_deletion_request(user_input: str):
         "erase data", "erase information", "erase account",
         "forget my data", "forget my information", "forget me",
         "gdpr delete", "delete everything", "delete all my data",
-        "i want to delete", "i want my data deleted", "delete everything about me"
+        "i want to delete", "i want my data deleted", "delete everything about me",
+        "delete all", "remove all", "erase all", "delete everything",
+        "clear my data", "clear data", "wipe my data", "wipe data",
+        "delete this", "delete that", "remove this", "remove that",
+        "delete convo", "delete conversation", "delete chat",
+        "remove convo", "remove conversation", "remove chat"
     ]
     
-    # Check if user input contains deletion keywords
+    # Check for exact phrase matches
     for keyword in deletion_keywords:
         if keyword in user_input_lower:
+            print(f"   🗑️ Deletion keyword matched: '{keyword}' in '{user_input_lower}'")
+            return True
+    
+    # Flexible matching: check if message contains deletion action + data context
+    has_deletion_action = any(action in user_input_lower for action in deletion_actions)
+    has_data_context = any(context in user_input_lower for context in data_contexts)
+    
+    if has_deletion_action and has_data_context:
+        print(f"   🗑️ Deletion detected (flexible match): action + context in '{user_input_lower}'")
+        return True
+    
+    # Also check for just "delete" with common phrases
+    if "delete" in user_input_lower:
+        delete_phrases = ["delete this", "delete that", "delete it", "delete convo", 
+                         "delete info", "delete my", "delete the", "delete any"]
+        if any(phrase in user_input_lower for phrase in delete_phrases):
+            print(f"   🗑️ Deletion detected (delete phrase): '{user_input_lower}'")
             return True
     
     return False
@@ -825,6 +916,7 @@ def delete_all_lead_data(leadgen_id: str):
     chat_history_table = "messages"
     
     try:
+        print(f"   🔍 Starting deletion for leadgen_id: {leadgen_id}")
         engine = create_engine(PG_CONN_STRING)
         Session = sessionmaker(bind=engine)
         session = Session()
@@ -837,41 +929,56 @@ def delete_all_lead_data(leadgen_id: str):
         deleted_lead = False
         
         # Delete all messages for this lead (by session_id and lead_id to be thorough)
+        print(f"   🔍 Searching for messages with session_id={session_id} or lead_id={leadgen_id}")
         messages_to_delete = session.query(message_model).filter(
             (message_model.session_id == session_id) | 
             (message_model.lead_id == str(leadgen_id))
         ).all()
         
+        print(f"   🔍 Found {len(messages_to_delete)} messages to delete")
         if messages_to_delete:
             for msg in messages_to_delete:
                 session.delete(msg)
                 deleted_messages_count += 1
+            print(f"   ✅ Deleted {deleted_messages_count} messages")
         
         # Delete the lead record itself
+        print(f"   🔍 Searching for lead with leadgen_id={leadgen_id}")
         lead_to_delete = session.query(lead_model).filter(
             lead_model.leadgen_id == str(leadgen_id)
         ).first()
         
         if lead_to_delete:
+            print(f"   ✅ Found lead record to delete: {lead_to_delete.name} ({lead_to_delete.email})")
             session.delete(lead_to_delete)
             deleted_lead = True
+        else:
+            print(f"   ⚠️ No lead record found with leadgen_id={leadgen_id}")
         
+        print(f"   💾 Committing deletion transaction...")
         session.commit()
+        print(f"   ✅ Transaction committed successfully")
         
-        return {
+        result = {
             "message": f"All data for lead {leadgen_id} has been deleted successfully.",
             "deleted_messages": deleted_messages_count,
             "deleted_lead": deleted_lead
         }
+        print(f"   ✅ Deletion result: {result}")
+        return result
         
     except Exception as e:
-        print(f"Error deleting all lead data for {leadgen_id}: {e}")
+        print(f"   ❌ Error deleting all lead data for {leadgen_id}: {e}")
+        import traceback
+        traceback.print_exc()
         if session:
             session.rollback()
+            print(f"   🔄 Transaction rolled back")
         return {"error": str(e)}
     finally:
         if session:
             session.close()
+            print(f"   🔒 Database session closed")
 
 
 def delete_user_data(user_id: str):
@@ -952,3 +1059,326 @@ def get_conversation(lead_id):
         print(f"Error retrieving conversation for lead {lead_id}: {e}")
         return {"error": str(e)}
 
+
+def sendWhatsAppTemplate(to_number, first_name, template_sid=None):
+    """
+    Send a WhatsApp template message with first name placeholder.
+    
+    Args:
+        to_number: Recipient WhatsApp number (e.g., +923007675900)
+        first_name: First name to use in template placeholder {{1}}
+        template_sid: Template SID (uses config if not provided)
+    
+    Returns:
+        dict: Message status and details
+    """
+    if not client:
+        print("Error: Twilio client not initialized. Check your credentials.")
+        return {"error": "Twilio client not initialized"}
+    
+    try:
+        # Get configuration
+        use_sandbox = config.TWILIO_USE_SANDBOX
+        
+        # Get from number
+        if config.TWILIO_WHATSAPP_FROM:
+            from_ = config.TWILIO_WHATSAPP_FROM
+        else:
+            return {"error": "WhatsApp sender not configured"}
+
+        # Get template SID
+        template_sid = template_sid or config.TEMPLATE_SID
+        if not template_sid:
+            return {"error": "Template SID not configured"}
+
+        # Ensure WhatsApp format
+        if not to_number.startswith("whatsapp:"):
+            to = f"whatsapp:{to_number}"
+        else:
+            to = to_number
+            
+        if not from_.startswith("whatsapp:"):
+            from_ = f"whatsapp:{from_}"
+        
+        # Extract first name from full name if needed
+        if first_name:
+            # Split by space and take first part
+            first_name_clean = first_name.split()[0] if first_name else "there"
+        else:
+            first_name_clean = "there"
+        
+        # Create content variables JSON for template placeholder {{1}}
+        content_variables = json.dumps({"1": first_name_clean})
+        
+        mode = "SANDBOX" if use_sandbox else "PRODUCTION"
+        print(f"[{mode}] Sending WhatsApp template to {to} with name: {first_name_clean}")
+        print(f"  Template SID: {template_sid}")
+
+        message = client.messages.create(
+            from_=from_,
+            to=to,
+            content_sid=template_sid,
+            content_variables=content_variables
+        )
+        
+        print(f"✓ Template message created successfully. SID: {message.sid}")
+        print(f"  Status: {message.status}")
+        
+        return {
+            "status": "sent",
+            "message_sid": message.sid,
+            "message_status": message.status,
+            "mode": mode.lower(),
+            "to": to,
+            "from": from_
+        }
+    except Exception as e:
+        print(f"✗ Error sending WhatsApp template: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+def sendWhatsAppMessage(to_number, message_body, from_number=None):
+    """
+    Send a regular WhatsApp text message (not template).
+    
+    Args:
+        to_number: Recipient WhatsApp number (e.g., +923007675900)
+        message_body: Message text to send
+        from_number: Sender WhatsApp number (uses config if not provided)
+    
+    Returns:
+        dict: Message status and details
+    """
+    if not client:
+        print("Error: Twilio client not initialized. Check your credentials.")
+        return {"error": "Twilio client not initialized"}
+    
+    try:
+        # Get from number
+        if from_number:
+            from_ = from_number
+        elif config.TWILIO_WHATSAPP_FROM:
+            from_ = config.TWILIO_WHATSAPP_FROM
+        else:
+            return {"error": "WhatsApp sender not configured"}
+
+        # Ensure WhatsApp format
+        if not to_number.startswith("whatsapp:"):
+            to = f"whatsapp:{to_number}"
+        else:
+            to = to_number
+            
+        if not from_.startswith("whatsapp:"):
+            from_ = f"whatsapp:{from_}"
+        
+        print(f"Sending WhatsApp message to {to}")
+
+        message = client.messages.create(
+            from_=from_,
+            to=to,
+            body=message_body
+        )
+        
+        print(f"✓ Message sent successfully. SID: {message.sid}")
+        
+        return {
+            "status": "sent",
+            "message_sid": message.sid,
+            "message_status": message.status,
+            "to": to,
+            "from": from_
+        }
+    except Exception as e:
+        print(f"✗ Error sending WhatsApp message: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+def get_lead_by_phone(phone_number):
+    """
+    Get lead information by phone number.
+    
+    Args:
+        phone_number: Phone number to search for (can be with or without whatsapp: prefix)
+    
+    Returns:
+        tuple: (leadgen_id, lead_name) or (None, None) if not found
+    """
+    session = None
+    try:
+        # Clean phone number (remove whatsapp: prefix and any formatting)
+        clean_phone = phone_number.replace("whatsapp:", "").strip()
+        
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        
+        Base = declarative_base()
+        lead_model = models.create_leads_model('leads', Base)
+        
+        # Search for lead by phone number
+        lead = session.query(lead_model).filter(lead_model.phone == clean_phone).first()
+        
+        if lead:
+            return lead.leadgen_id, lead.name
+        else:
+            return None, None
+    except Exception as e:
+        print(f"Error finding lead by phone: {e}")
+        return None, None
+    finally:
+        if session:
+            session.close()
+
+def handle_deletion_request(from_number, leadgen_id, incoming_message):
+    """
+    Handle deletion request from user.
+    
+    Args:
+        from_number: User's WhatsApp number
+        leadgen_id: Lead identifier
+        incoming_message: User's deletion request message
+    
+    Returns:
+        str: TwiML XML response
+    """
+    response = MessagingResponse()
+    print(f"🗑️ DELETION REQUEST detected from {from_number} for lead {leadgen_id}")
+    print(f"   Message: '{incoming_message}'")
+    
+    try:
+        deletion_result = delete_all_lead_data(leadgen_id)
+        
+        if "error" in deletion_result:
+            deletion_msg = "I apologize, but I encountered an error while trying to delete your data. Please contact support if this issue persists."
+            print(f"   ❌ Error deleting data: {deletion_result.get('error')}")
+        else:
+            deleted_messages = deletion_result.get('deleted_messages', 0)
+            deleted_lead = deletion_result.get('deleted_lead', False)
+            deletion_msg = "I've successfully deleted all of your data from our system. Your information, conversation history, and account have been permanently removed. Thank you for using our service, and I wish you all the best."
+            print(f"   ✅ Data deleted successfully: {deleted_messages} messages deleted, lead record deleted: {deleted_lead}")
+        
+        send_result = sendWhatsAppMessage(from_number, deletion_msg)
+        if send_result.get('error'):
+            response.message(deletion_msg)
+        else:
+            response.message("")
+        
+        return str(response)
+    except Exception as e:
+        print(f"   ❌ Exception during deletion: {e}")
+        import traceback
+        traceback.print_exc()
+        error_msg = "I apologize, but I encountered an error while trying to delete your data. Please contact support if this issue persists."
+        sendWhatsAppMessage(from_number, error_msg)
+        response.message("")
+        return str(response)
+
+
+def handle_agent_conversation(from_number, leadgen_id, incoming_message):
+    """
+    Handle conversation with agent.
+    
+    Args:
+        from_number: User's WhatsApp number
+        leadgen_id: Lead identifier
+        incoming_message: User's message
+    
+    Returns:
+        str: TwiML XML response
+    """
+    response = MessagingResponse()
+    
+    try:
+        agent_result = run_agent(incoming_message, leadgen_id)
+        
+        if agent_result and isinstance(agent_result, dict):
+            agent_response = agent_result.get('text', 'I apologize, but I had trouble processing that. Could you please rephrase?')
+            
+            if agent_result.get('data_deleted'):
+                print(f"Data deletion completed via agent for lead {leadgen_id}")
+            
+            send_result = sendWhatsAppMessage(from_number, agent_response)
+            
+            if send_result.get('error'):
+                response.message(agent_response)
+            else:
+                response.message("")
+            
+            if agent_result.get('conversation_ending') and not agent_result.get('data_deleted'):
+                print(f"Conversation ending for lead {leadgen_id}. Evaluating eligibility...")
+                try:
+                    evaluate_final_eligibility(leadgen_id)
+                except Exception as e:
+                    print(f"Error evaluating eligibility: {e}")
+        else:
+            error_msg = "I apologize, but I'm having trouble processing your request right now. Please try again in a moment."
+            sendWhatsAppMessage(from_number, error_msg)
+            response.message("")
+        
+        return str(response)
+    except Exception as e:
+        print(f"Error processing message with agent: {e}")
+        import traceback
+        traceback.print_exc()
+        error_msg = "Sorry, there was an error processing your message. Please try again."
+        sendWhatsAppMessage(from_number, error_msg)
+        response.message("")
+        return str(response)
+
+
+def receive_message(data=None):
+    """
+    Receive and route incoming WhatsApp messages.
+    
+    Args:
+        data: Incoming message data from Twilio webhook with 'Body' and 'From' fields
+    
+    Returns:
+        str: TwiML XML response
+    """
+    try:
+        response = MessagingResponse()
+        
+        if not data:
+            response.message("Thank you for your message. We will get back to you soon.")
+            return str(response)
+        
+        incoming_message = data.get('Body', '').strip()
+        from_number = data.get('From', '')
+        
+        if not incoming_message:
+            response.message("Please send a message.")
+            return str(response)
+        
+        print(f"Received WhatsApp message from {from_number}: {incoming_message}")
+        
+        # Get lead_id from phone number
+        leadgen_id, lead_name = get_lead_by_phone(from_number)
+        
+        if not leadgen_id:
+            print(f"⚠️ Warning: No lead found for phone number {from_number}")
+            if is_deletion_request(incoming_message):
+                response.message("Your data has already been deleted. There is no information stored about you in our system.")
+            else:
+                response.message("Sorry, we couldn't find your information. Please contact support.")
+            return str(response)
+        
+        print(f"Found lead: {leadgen_id} ({lead_name})")
+        
+        # Route to appropriate handler
+        if is_deletion_request(incoming_message):
+            return handle_deletion_request(from_number, leadgen_id, incoming_message)
+        else:
+            return handle_agent_conversation(from_number, leadgen_id, incoming_message)
+        
+    except Exception as e:
+        print(f"Error processing incoming message: {e}")
+        import traceback
+        traceback.print_exc()
+        response = MessagingResponse()
+        response.message("Sorry, there was an error processing your message.")
+        return str(response)

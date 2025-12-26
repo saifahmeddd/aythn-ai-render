@@ -43,5 +43,5 @@ def delayed_subscribe():
 
 if __name__ == "__main__":
     print(f"Application running on http://{config.HOST}:{config.PORT}")
-    threading.Thread(target=delayed_subscribe).start()
+    # threading.Thread(target=delayed_subscribe).start()
     app.run(host=config.HOST, port=config.PORT)

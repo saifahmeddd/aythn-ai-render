@@ -20,6 +20,8 @@ def create_leads_model(table_name, dynamic_base):
         leadgen_id = Column(String, primary_key=True)  # Facebook leadgen_id from webhook (primary key)
         name = Column(Text, nullable=True)
         email = Column(Text, nullable=True)
+        phone = Column(Text, nullable=True)
+        form_id = Column(String, nullable=True)
         eligible = Column(Boolean)
         created_at = Column(DateTime)
 
@@ -72,4 +74,6 @@ def initialize_database():
 
     except Exception as e:
         print(f"Error initializing database: {e}")
+        import traceback
+        traceback.print_exc()
         return False
