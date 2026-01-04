@@ -13,7 +13,7 @@ MAKE_SECRET=config.MAKE_SECRET
 
 @AYTHN_BLUEPRINT.route("/new-lead", methods=["POST"])
 def receive_lead():
-    # simple verification via header (set this in Zap)
+    # simple verification via header 
     if request.headers.get('X-Make-Secret') != MAKE_SECRET:
         return jsonify({"error": "forbidden"}), 403
 
@@ -27,12 +27,12 @@ def receive_lead():
             return jsonify({"error": "lead_id is required"}), 400
         
         # Save lead data to database
-        # Get Twilio from number from payload or use config default
-        twilio_from_number = payload.get('twilio_from_number') or config.TWILIO_WHATSAPP_FROM
-        new_lead, leadgen_id, lead_name, lead_email, lead_phone = AythnView.save_lead_to_db(
-            lead_id, payload, twilio_from_number
+        # Get business_id from payload
+        business_id = payload.get('business_id')
+        new_lead, leadgen_id, lead_name, lead_email, lead_phone, _ = AythnView.save_lead_to_db(
+            lead_id, payload, business_id
         )
-        
+
         if new_lead and leadgen_id:
             print(f"Lead saved successfully: {lead_name} ({lead_email}) with leadgen_id: {leadgen_id}, phone: {lead_phone}")
             
@@ -104,9 +104,7 @@ def webhook():
     if request.method == "POST":
         data = request.get_json()
         print("Received webhook:", data)
-        # Get Twilio from number from config (webhook doesn't typically include it)
-        twilio_from_number = config.TWILIO_WHATSAPP_FROM
-        AythnView.store_lead_data(data, twilio_from_number)
+        AythnView.store_lead_data(data)
         return Response("EVENT_RECEIVED", mimetype=TEXT_PLAIN), 200
 
 

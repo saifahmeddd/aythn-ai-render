@@ -21,7 +21,6 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 MAKE_SECRET= os.getenv("MAKE_SECRET")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")  # Your approved WhatsApp Business number
 TWILIO_USE_SANDBOX = os.getenv("TWILIO_USE_SANDBOX", "false").lower() == "true"  # Defaults to false (production mode)
 TEMPLATE_SID=os.getenv("TEMPLATE_SID")
 

@@ -8,7 +8,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import json
-import time
 from langchain.chains import LLMChain
 import requests
 from datetime import datetime
@@ -17,7 +16,6 @@ import config
 from database import models
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
-import time
 
 # Load environment variables
 load_dotenv()
@@ -671,7 +669,7 @@ def send_initial_greeting(leadgen_id: str, lead_name: str = None):
         return None
 
 
-def save_lead_to_db(leadgen_id: str, lead_data=None, twilio_from_number: str = None):
+def save_lead_to_db(leadgen_id: str, lead_data=None, business_id=None):
     """
     Extracts lead fields and stores them in your Leads table.
     
@@ -679,12 +677,13 @@ def save_lead_to_db(leadgen_id: str, lead_data=None, twilio_from_number: str = N
         leadgen_id: The Facebook leadgen_id from the webhook (or lead_id from webhook payload)
         lead_data: Optional lead data dict with fields: full_name, email, phone, form_id, created_time
                   OR Facebook API format with field_data array
-        twilio_from_number: Optional Twilio from number to associate lead with a business
+        business_id: Optional business ID to associate lead with a business. If provided, fetches twilio_from_number from DB.
     
     Returns:
-        tuple: (new_lead object, leadgen_id string, lead_name, lead_email, lead_phone)
+        tuple: (new_lead object, leadgen_id string, lead_name, lead_email, lead_phone, twilio_from_number)
     """
     session = None
+    twilio_from_number = None
     try:
         # Extract fields from lead_data if provided
         name = None
@@ -729,42 +728,36 @@ def save_lead_to_db(leadgen_id: str, lead_data=None, twilio_from_number: str = N
         business_model = models.create_business_model('businesses', Base)
         lead_model = models.create_leads_model('leads', Base)
         
-        # Get or create business if twilio_from_number is provided
-        business_id = None
-        if twilio_from_number:
-            # Clean the phone number (remove whatsapp: prefix)
-            clean_number = twilio_from_number.replace("whatsapp:", "").strip()
-            
-            # Try to find existing business
-            business = session.query(business_model).filter(
-                business_model.twilio_from_number == clean_number
-            ).first()
-            
-            if business:
-                business_id = business.id
-            else:
-                # Create new business if not found
-                new_business = business_model(
-                    twilio_from_number=clean_number,
-                    created_at=datetime.now()
-                )
-                session.add(new_business)
-                session.commit()
-                session.refresh(new_business)
-                business_id = new_business.id
-                print(f"Created new business with Twilio number: {clean_number} (ID: {business_id})")
-            
-            if business_id:
-                print(f"Associating lead {leadgen_id} with business ID: {business_id}")
-            else:
-                print(f"Warning: Could not get/create business for {twilio_from_number}, saving lead without business association")
+        # Fetch business and get twilio_from_number if business_id is provided
+        if business_id:
+            try:
+                # Convert business_id to UUID if it's a string
+                if isinstance(business_id, str):
+                    import uuid as uuid_lib
+                    business_id = uuid_lib.UUID(business_id)
+                
+                # Fetch business from database
+                business = session.query(business_model).filter(
+                    business_model.id == business_id
+                ).first()
+                
+                if business:
+                    twilio_from_number = business.twilio_from_number
+                    print(f"Fetched twilio_from_number '{twilio_from_number}' for business ID: {business_id}")
+                    print(f"Associating lead {leadgen_id} with business ID: {business_id}")
+                else:
+                    print(f"Warning: Business with ID {business_id} not found, saving lead without business association")
+                    business_id = None
+            except Exception as e:
+                print(f"Error fetching business: {e}")
+                business_id = None
         
         # Use provided created_time or current time
         created_at = created_time if created_time else datetime.now()
         
         new_lead = lead_model(
             leadgen_id=str(leadgen_id),  # Store Facebook leadgen_id
-            business_id=business_id,  # Associate with business if available
+            business_id=business_id,
             name=name,  
             email=email,  
             phone=phone, 
@@ -783,23 +776,23 @@ def save_lead_to_db(leadgen_id: str, lead_data=None, twilio_from_number: str = N
         lead_email = new_lead.email
         lead_phone = new_lead.phone
         
-        return new_lead, str(leadgen_id), lead_name, lead_email, lead_phone
+        return new_lead, str(leadgen_id), lead_name, lead_email, lead_phone, twilio_from_number
     except Exception as e:
         print(f"Error saving lead: {e}")
         if session:
             session.rollback()
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     finally:
         if session:
             session.close()
 
-def store_lead_data(data: dict, twilio_from_number: str = None):
+def store_lead_data(data: dict, business_id=None):
     """
     Store lead data in the database and automatically send initial greeting.
     
     Args:
         data: Lead data from webhook
-        twilio_from_number: Optional Twilio from number to associate lead with a business
+        business_id: Optional business ID to associate lead with a business
     """
     try:
             # Loop through entries and changes
@@ -809,13 +802,9 @@ def store_lead_data(data: dict, twilio_from_number: str = None):
                         lead_id = change["value"]["leadgen_id"]
                         print(f"Fetching lead details for ID: {lead_id}")
                         lead_data = None
-
-                        # If twilio_from_number not provided, try to get from config
-                        if not twilio_from_number:
-                            twilio_from_number = config.TWILIO_WHATSAPP_FROM
                         
-                        new_lead, leadgen_id, lead_name, lead_email, lead_phone = save_lead_to_db(
-                            lead_id, lead_data, twilio_from_number
+                        new_lead, leadgen_id, lead_name, lead_email, lead_phone, _ = save_lead_to_db(
+                            lead_id, lead_data, business_id
                         )
                         if new_lead and leadgen_id:
                             print(f"Lead saved successfully: {lead_name} ({lead_email}) with leadgen_id: {leadgen_id}, phone: {lead_phone}")
