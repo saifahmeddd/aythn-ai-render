@@ -39,7 +39,7 @@ def receive_lead():
             # Send WhatsApp template message with first name
             if lead_phone:
                 print(f"Sending WhatsApp template message to {lead_phone}...")
-                template_result = AythnView.sendWhatsAppTemplate(lead_phone, lead_name)
+                template_result = AythnView.sendWhatsAppTemplate(lead_phone, lead_name, business_id)
                 if template_result.get('error'):
                     print(f"Failed to send WhatsApp template: {template_result.get('error')}")
                 else:

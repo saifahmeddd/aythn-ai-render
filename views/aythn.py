@@ -1141,8 +1141,36 @@ def get_conversation(lead_id):
         print(f"Error retrieving conversation for lead {lead_id}: {e}")
         return {"error": str(e)}
 
+def business_twilio_from_number(business_id):
+    """
+    Get the Twilio from number for a business.
+    """
+    session = None
+    try:
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
 
-def sendWhatsAppTemplate(to_number, first_name, template_sid=None):
+        Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
+
+        business = session.query(business_model).filter(
+            business_model.id == business_id
+        ).first()
+        return business.twilio_from_number
+
+        if business:
+            return business.twilio_from_number
+        else:
+            return None
+    except Exception as e:
+        print(f"Error getting Twilio from number for business {business_id}: {e}")
+        return None
+    finally:
+        if session:
+            session.close()
+
+def sendWhatsAppTemplate(to_number, first_name, business_id, template_sid=None):
     """
     Send a WhatsApp template message with first name placeholder.
     
@@ -1150,23 +1178,26 @@ def sendWhatsAppTemplate(to_number, first_name, template_sid=None):
         to_number: Recipient WhatsApp number (e.g., +923007675900)
         first_name: First name to use in template placeholder {{1}}
         template_sid: Template SID (uses config if not provided)
+        business_id: Business ID to get Twilio from number
     
-    Returns:
+    Returns:    
         dict: Message status and details
     """
     if not client:
         print("Error: Twilio client not initialized. Check your credentials.")
         return {"error": "Twilio client not initialized"}
     
+    # Get from number from business table
+    from_number = business_twilio_from_number(business_id)
+    if not from_number:
+        return {"error": "Twilio from number not found"}
+
     try:
         # Get configuration
         use_sandbox = config.TWILIO_USE_SANDBOX
         
         # Get from number
-        if config.TWILIO_WHATSAPP_FROM:
-            from_ = config.TWILIO_WHATSAPP_FROM
-        else:
-            return {"error": "WhatsApp sender not configured"}
+        from_ = from_number
 
         # Get template SID
         template_sid = template_sid or config.TEMPLATE_SID
@@ -1241,8 +1272,6 @@ def sendWhatsAppMessage(to_number, message_body, from_number=None):
         # Get from number
         if from_number:
             from_ = from_number
-        elif config.TWILIO_WHATSAPP_FROM:
-            from_ = config.TWILIO_WHATSAPP_FROM
         else:
             return {"error": "WhatsApp sender not configured"}
 
