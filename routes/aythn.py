@@ -159,11 +159,19 @@ def finalize_eligibility():
     try:
         data = request.get_json()
         leadgen_id = data.get("leadgen_id") or data.get("lead_id")
-        
+
         if not leadgen_id:
             return jsonify({"error": "Leadgen ID is required"}), 400
-        
-        result = AythnView.evaluate_final_eligibility(leadgen_id)
+
+        # Get business_id and load domain data for this lead
+        business_id = AythnView.get_business_id_for_lead(str(leadgen_id))
+        if business_id:
+            _, qa_mapping, eligibility_mapping, _, global_eligibility_rules = AythnView.get_domain_data_for_business(business_id)
+            result = AythnView.evaluate_final_eligibility(leadgen_id, eligibility_mapping, global_eligibility_rules)
+        else:
+            # Fallback to global evaluation
+            result = AythnView.evaluate_final_eligibility(leadgen_id)
+
         status = 200 if "error" not in result else 500
         return jsonify(result), status
     except Exception as e:

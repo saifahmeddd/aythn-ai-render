@@ -32,95 +32,247 @@ except Exception as e:
     print(f"Warning: Failed to initialize Twilio client: {e}")
 
 
-def load_domain_qa_data(file_path: str = "domain-q&a.json"):
+def load_domain_qa_data(business_id: str = None):
     """
-    Load domain Q&A data from JSON file and format it for the system prompt.
+    Load domain Q&A data from NestJS backend API and format it for the system prompt.
     
     Args:
-        file_path: Path to the domain Q&A JSON file
+        business_id: Business ID to fetch domain Q&A data for
         
         
     Returns:
         tuple: (formatted string for prompt, dict of user inputs to responses with next_route, eligibility_mapping, eligibility_rules)
     """
     try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            qa_data = json.load(file)
+        # If no business_id provided, return empty data
+        if not business_id:
+            print("Warning: No business_id provided for domain Q&A loading")
+            return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
+
+        # Import config here to avoid circular imports
+        import config
+
+        if not config.NESTJS_BACKEND_URL:
+            print("Warning: NESTJS_BACKEND_URL not configured, falling back to local file")
+            # Fallback to local file if API URL not configured
+            try:
+                with open("domain-q&a.json", 'r', encoding='utf-8') as file:
+                    qa_data = json.load(file)
+            except FileNotFoundError:
+                return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
+        else:
+            # Fetch from NestJS backend API
+            api_url = f"{config.NESTJS_BACKEND_URL}/questions-structure/{business_id}"
+            print(f"Fetching domain Q&A data from: {api_url}")
+
+            response = requests.get(api_url, timeout=10)
+
+            if response.status_code == 200:
+                response_data = response.json()
+                if response_data.get("success") and response_data.get("data"):
+                    qa_data = response_data["data"]
+                    print(f"Successfully loaded domain Q&A data for business {business_id}")
+                else:
+                    print(f"API returned error: {response_data.get('error', 'Unknown error')}")
+                    # Fallback to local file
+                    try:
+                        with open("domain-q&a.json", 'r', encoding='utf-8') as file:
+                            qa_data = json.load(file)
+                        print("Falling back to local domain-q&a.json file")
+                    except FileNotFoundError:
+                        return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
+            else:
+                print(f"Failed to fetch domain Q&A data: HTTP {response.status_code}")
+                # Fallback to local file
+                try:
+                    with open("domain-q&a.json", 'r', encoding='utf-8') as file:
+                        qa_data = json.load(file)
+                    print("Falling back to local domain-q&a.json file")
+                except FileNotFoundError:
+                    return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
         
         domains_text = "DOMAIN KNOWLEDGE:\nYou have access to the following domain-specific information to help users:\n\n"
         qa_mapping = {}  # Map user inputs to responses with next_route
         eligibility_mapping = {}  # Map user inputs to eligibility status
         eligibility_rules = {}  # Store eligibility rules per domain
-        
+
+        def process_answers(answers_dict, question_text, level=0):
+            """Recursively process answers and follow-up questions"""
+            indent = "  " * (level + 1)
+            for answer_key, answer_info in answers_dict.items():
+                response = answer_info.get("response", "")
+                next_route = answer_info.get("next_route")
+                eligible = answer_info.get("eligible", False)
+
+                domains_text = globals()['domains_text']  # Access outer variable
+                domains_text += f"{indent}- If they say '{answer_key}': Respond with \"{response}\"\n"
+
+                # Store mapping for quick lookup
+                qa_mapping[answer_key.lower()] = {
+                    "response": response,
+                    "next_route": next_route
+                }
+                # Store eligibility mapping
+                eligibility_mapping[answer_key.lower()] = eligible
+
+                # Process follow-up questions
+                follow_up = answer_info.get("follow_up")
+                if follow_up:
+                    follow_up_question = follow_up.get("question", "")
+                    domains_text += f"{indent}  Follow-up: {follow_up_question}\n"
+                    follow_up_answers = follow_up.get("answers", {})
+                    process_answers(follow_up_answers, follow_up_question, level + 1)
+
         for domain_name, domain_info in qa_data.get("domains", {}).items():
             # Format domain name (replace underscores with spaces and capitalize)
             formatted_domain = domain_name.replace('_', ' ').title()
             domains_text += f"{formatted_domain.upper()}:\n"
-            
-            # Store eligibility rules for this domain
+
+            # Store eligibility rules for this domain (if any)
             if "eligibility_rules" in domain_info:
                 eligibility_rules[domain_name] = domain_info["eligibility_rules"]
-            
+
             questions = domain_info.get("questions", [])
             for question_data in questions:
                 question = question_data.get("question", "")
                 answers = question_data.get("answers", {})
-                
+
                 domains_text += f"- {question}\n"
-                
-                for answer_key, answer_info in answers.items():
-                    response = answer_info.get("response", "")
-                    next_route = answer_info.get("next_route", "/")
-                    eligible = answer_info.get("eligible", False)
-                    domains_text += f"  - If they say '{answer_key}': Respond with \"{response}\"\n"
-                    # Store mapping for quick lookup
-                    qa_mapping[answer_key.lower()] = {
-                        "response": response,
-                        "next_route": next_route
-                    }
-                    # Store eligibility mapping
-                    eligibility_mapping[answer_key.lower()] = eligible
-                
+                process_answers(answers, question)
                 domains_text += "\n"
         
         global_rules = qa_data.get("global_eligibility_rules", {})
         
         return domains_text, qa_mapping, eligibility_mapping, eligibility_rules, global_rules
-        
-    except FileNotFoundError:
-        print(f"Warning: Domain Q&A file {file_path} not found")
-        return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
-    except json.JSONDecodeError as e:
-        print(f"Error parsing domain Q&A file: {e}")
+
+    except requests.RequestException as e:
+        print(f"Error fetching domain Q&A data from API: {e}")
+        # Fallback to local file
+        try:
+            with open("domain-q&a.json", 'r', encoding='utf-8') as file:
+                qa_data = json.load(file)
+            print("Falling back to local domain-q&a.json file due to API error")
+            # Process the fallback data (using simplified version for backward compatibility)
+            domains_text = "DOMAIN KNOWLEDGE:\nYou have access to the following domain-specific information to help users:\n\n"
+            qa_mapping = {}
+            eligibility_mapping = {}
+            eligibility_rules = {}
+            for domain_name, domain_info in qa_data.get("domains", {}).items():
+                formatted_domain = domain_name.replace('_', ' ').title()
+                domains_text += f"{formatted_domain.upper()}:\n"
+                if "eligibility_rules" in domain_info:
+                    eligibility_rules[domain_name] = domain_info["eligibility_rules"]
+                questions = domain_info.get("questions", [])
+                for question_data in questions:
+                    question = question_data.get("question", "")
+                    domains_text += f"- {question}\n"
+                    answers = question_data.get("answers", {})
+                    for answer_key, answer_info in answers.items():
+                        response = answer_info.get("response", "")
+                        next_route = answer_info.get("next_route", "/")
+                        eligible = answer_info.get("eligible", False)
+                        domains_text += f"  - If they say '{answer_key}': Respond with \"{response}\"\n"
+                        qa_mapping[answer_key.lower()] = {
+                            "response": response,
+                            "next_route": next_route
+                        }
+                        eligibility_mapping[answer_key.lower()] = eligible
+                    domains_text += "\n"
+            global_rules = qa_data.get("global_eligibility_rules", {})
+            return domains_text, qa_mapping, eligibility_mapping, eligibility_rules, global_rules
+        except (FileNotFoundError, json.JSONDecodeError) as fallback_error:
+            print(f"Fallback also failed: {fallback_error}")
+            return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
+    except Exception as e:
+        print(f"Unexpected error loading domain Q&A data: {e}")
         return "DOMAIN KNOWLEDGE:\nError loading domain information.\n\n", {}, {}, {}, {}
 
 
 # PostgreSQL (PGVector) Connection
 PG_CONN_STRING = config.PG_CONN_STRING
 
-# Load domain Q&A data
-domain_knowledge, qa_mapping, eligibility_mapping, eligibility_rules, global_eligibility_rules = load_domain_qa_data()
+# Cache for domain Q&A data by business_id
+_domain_cache = {}
+
+def get_business_id_for_lead(lead_id: str):
+    """
+    Get the business_id for a given lead.
+
+    Args:
+        lead_id: The lead identifier (leadgen_id)
+
+    Returns:
+        str: Business ID as string, or None if not found
+    """
+    session = None
+    try:
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+
+        Base = declarative_base()
+        lead_model = models.create_leads_model('leads', Base)
+
+        lead = session.query(lead_model).filter(lead_model.leadgen_id == str(lead_id)).first()
+
+        if lead and lead.business_id:
+            return str(lead.business_id)
+        else:
+            print(f"Warning: No business_id found for lead {lead_id}")
+            return None
+    except Exception as e:
+        print(f"Error getting business_id for lead {lead_id}: {e}")
+        return None
+    finally:
+        if session:
+            session.close()
 
 
-def determine_eligibility(user_input: str, conversation_history: list = None):
+def get_domain_data_for_business(business_id: str):
+    """
+    Get or load domain Q&A data for a specific business.
+    Uses caching to avoid repeated API calls.
+
+    Args:
+        business_id: Business ID to fetch domain data for
+
+    Returns:
+        tuple: (domain_knowledge, qa_mapping, eligibility_mapping, eligibility_rules, global_eligibility_rules)
+    """
+    if business_id in _domain_cache:
+        return _domain_cache[business_id]
+
+    # Load data for this business
+    data = load_domain_qa_data(business_id)
+    _domain_cache[business_id] = data
+    return data
+
+
+def determine_eligibility(user_input: str, conversation_history: list = None, eligibility_mapping: dict = None, global_eligibility_rules: dict = None):
     """
     Determine if a lead is eligible based on their answers (user messages only, not agent responses).
-    
+
     Args:
         user_input: The current user input
         conversation_history: List of previous messages in the conversation
-    
+        eligibility_mapping: Business-specific eligibility mapping (uses global if None)
+        global_eligibility_rules: Business-specific global rules (uses global if None)
+
     Returns:
         bool: True if eligible, False otherwise
     """
+    # Use provided mappings or fall back to global ones
+    current_eligibility_mapping = eligibility_mapping if eligibility_mapping is not None else globals().get('eligibility_mapping', {})
+    current_global_rules = global_eligibility_rules if global_eligibility_rules is not None else globals().get('global_eligibility_rules', {"default_eligible": False})
+
     user_input_lower = user_input.lower().strip()
-    
+
     # Check if the current user input matches any eligible answer
-    if user_input_lower in eligibility_mapping:
-        return eligibility_mapping[user_input_lower]
-    
+    if user_input_lower in current_eligibility_mapping:
+        return current_eligibility_mapping[user_input_lower]
+
     # Check for partial matches in current user input
-    for answer_key, is_eligible in eligibility_mapping.items():
+    for answer_key, is_eligible in current_eligibility_mapping.items():
         if answer_key in user_input_lower or user_input_lower in answer_key:
             return is_eligible
     
@@ -136,7 +288,7 @@ def determine_eligibility(user_input: str, conversation_history: list = None):
                     if msg_content == "hello":
                         continue
                     # Check if any previous user message matches eligible answers
-                    for answer_key, is_eligible in eligibility_mapping.items():
+                    for answer_key, is_eligible in current_eligibility_mapping.items():
                         if answer_key in msg_content or msg_content in answer_key:
                             if is_eligible:
                                 eligible_answers_found.append(True)
@@ -146,20 +298,26 @@ def determine_eligibility(user_input: str, conversation_history: list = None):
             return True
     
     # Default: not eligible if no matching criteria found
-    return global_eligibility_rules.get("default_eligible", False)
+    return current_global_rules.get("default_eligible", False)
 
 
-def evaluate_final_eligibility(leadgen_id: str):
+def evaluate_final_eligibility(leadgen_id: str, eligibility_mapping: dict = None, global_eligibility_rules: dict = None):
     """
     Evaluate and update eligibility based on the entire conversation history.
     This function should be called when the conversation ends.
-    
+
     Args:
         leadgen_id: The Facebook leadgen_id
-    
+        eligibility_mapping: Business-specific eligibility mapping (uses global if None)
+        global_eligibility_rules: Business-specific global rules (uses global if None)
+
     Returns:
         dict: Contains final eligibility status and evaluation details
     """
+    # Use provided mappings or fall back to global ones
+    current_eligibility_mapping = eligibility_mapping if eligibility_mapping is not None else globals().get('eligibility_mapping', {})
+    current_global_rules = global_eligibility_rules if global_eligibility_rules is not None else globals().get('global_eligibility_rules', {"default_eligible": False, "minimum_answers_required": 1})
+
     try:
         # Get all messages from the conversation
         session_id = str(leadgen_id)
@@ -194,15 +352,15 @@ def evaluate_final_eligibility(leadgen_id: str):
         
         for user_msg in user_messages:
             # Check exact matches
-            if user_msg in eligibility_mapping:
-                is_eligible = eligibility_mapping[user_msg]
+            if user_msg in current_eligibility_mapping:
+                is_eligible = current_eligibility_mapping[user_msg]
                 if is_eligible:
                     eligible_answers_found.append(user_msg)
                 else:
                     ineligible_answers_found.append(user_msg)
             else:
                 # Check partial matches
-                for answer_key, is_eligible in eligibility_mapping.items():
+                for answer_key, is_eligible in current_eligibility_mapping.items():
                     if answer_key in user_msg or user_msg in answer_key:
                         if is_eligible:
                             eligible_answers_found.append(user_msg)
@@ -213,14 +371,14 @@ def evaluate_final_eligibility(leadgen_id: str):
         # Determine final eligibility
         # If we found at least one eligible answer, the lead is eligible
         # Otherwise, check global rules
-        min_answers_required = global_eligibility_rules.get("minimum_answers_required", 1)
-        
+        min_answers_required = current_global_rules.get("minimum_answers_required", 1)
+
         if len(eligible_answers_found) >= min_answers_required:
             final_eligibility = True
         elif len(eligible_answers_found) > 0:
             final_eligibility = True  # At least one eligible answer found
         else:
-            final_eligibility = global_eligibility_rules.get("default_eligible", False)
+            final_eligibility = current_global_rules.get("default_eligible", False)
         
         # Update the lead's eligibility in the database
         update_lead_eligibility(leadgen_id, final_eligibility)
@@ -274,30 +432,7 @@ def update_lead_eligibility(leadgen_id: str, is_eligible: bool):
             session.close()
 
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            f"""
-You are Aythn, a friendly and helpful conversational AI assistant. Your goal is to have natural, human-like conversations with users while helping them with their questions and needs.
-
-Key guidelines for your interactions:
-1. Be warm, empathetic, and conversational - like talking to a knowledgeable friend
-2. Use natural language with appropriate casual expressions and contractions
-3. Show genuine interest in the user's responses
-4. Ask follow-up questions to better understand their needs
-5. Keep responses concise but engaging - avoid overly long explanations unless needed
-6. If you don't have specific information, be honest about it and offer to help in other ways
-
-{domain_knowledge}
-
-Remember: You're here to help and have a pleasant conversation, not just to provide robotic responses. Make the user feel heard and valued. Use the domain knowledge naturally in conversation flow.
-            """
-        ),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("user", "{input}"),
-    ]
-)
+# Prompt is now created dynamically in run_agent() based on business-specific domain data
 
 def is_conversation_ending(user_input: str, conversation_history: list = None):
     """
@@ -352,6 +487,16 @@ def run_agent(user_input: str, lead_id, max_number_of_messages: int=5):
     Returns:
         str: The agent's response based on the user input.
     """
+    # Get business_id for this lead and load domain data
+    business_id = get_business_id_for_lead(str(lead_id))
+    if business_id:
+        domain_knowledge, qa_mapping, eligibility_mapping, eligibility_rules, global_eligibility_rules = get_domain_data_for_business(business_id)
+    else:
+        # Fallback to default/global domain data
+        domain_knowledge, qa_mapping, eligibility_mapping, eligibility_rules, global_eligibility_rules = (
+            "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {"default_eligible": False, "minimum_answers_required": 1}
+        )
+
     # Check if user is requesting to delete their data
     if is_deletion_request(user_input):
         print(f"Deletion request detected for lead {lead_id}. Deleting all data...")
@@ -401,11 +546,37 @@ def run_agent(user_input: str, lead_id, max_number_of_messages: int=5):
         k=int(max_number_of_messages),
     )
 
+    # Create dynamic prompt for this business
+    business_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                f"""
+You are Aythn, a friendly and helpful conversational AI assistant. Your goal is to have natural, human-like conversations with users while helping them with their questions and needs.
+
+Key guidelines for your interactions:
+1. Be warm, empathetic, and conversational - like talking to a knowledgeable friend
+2. Use natural language with appropriate casual expressions and contractions
+3. Show genuine interest in the user's responses
+4. Ask follow-up questions to better understand their needs
+5. Keep responses concise but engaging - avoid overly long explanations unless needed
+6. If you don't have specific information, be honest about it and offer to help in other ways
+
+{domain_knowledge}
+
+Remember: You're here to help and have a pleasant conversation, not just to provide robotic responses. Make the user feel heard and valued. Use the domain knowledge naturally in conversation flow.
+                """
+            ),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("user", "{input}"),
+        ]
+    )
+
     # Initialize the llm model for direct conversation
     chat_model = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
-    
+
     # Create a simple chain with memory
-    chain = LLMChain(llm=chat_model, prompt=prompt, memory=memory)
+    chain = LLMChain(llm=chat_model, prompt=business_prompt, memory=memory)
 
     # Interact with the agent
     try:
@@ -416,7 +587,7 @@ def run_agent(user_input: str, lead_id, max_number_of_messages: int=5):
         conversation_history = memory.chat_memory.messages if hasattr(memory, 'chat_memory') else []
         
         # Determine eligibility based on user input and conversation history
-        is_eligible = determine_eligibility(user_input, conversation_history)
+        is_eligible = determine_eligibility(user_input, conversation_history, eligibility_mapping, global_eligibility_rules)
         
         # Update lead eligibility in database (real-time update)
         update_lead_eligibility(str(lead_id), is_eligible)
@@ -428,7 +599,7 @@ def run_agent(user_input: str, lead_id, max_number_of_messages: int=5):
         if conversation_ending:
             print(f"Conversation ending detected for lead {lead_id}. Evaluating final eligibility...")
             try:
-                final_evaluation = evaluate_final_eligibility(str(lead_id))
+                final_evaluation = evaluate_final_eligibility(str(lead_id), eligibility_mapping, global_eligibility_rules)
                 print(f"Final eligibility evaluation completed: {final_evaluation}")
             except Exception as e:
                 print(f"Error during final eligibility evaluation: {e}")
@@ -812,7 +983,7 @@ def store_lead_data(data: dict, business_id=None):
                             # Send WhatsApp template message with first name
                             if lead_phone:
                                 print(f"Sending WhatsApp template message to {lead_phone}...")
-                                template_result = sendWhatsAppTemplate(lead_phone, lead_name)
+                                template_result = sendWhatsAppTemplate(lead_phone, lead_name, business_id)
                                 if template_result.get('error'):
                                     print(f"Failed to send WhatsApp template: {template_result.get('error')}")
                                 else:
@@ -1424,7 +1595,9 @@ def handle_agent_conversation(from_number, leadgen_id, incoming_message):
             if agent_result.get('conversation_ending') and not agent_result.get('data_deleted'):
                 print(f"Conversation ending for lead {leadgen_id}. Evaluating eligibility...")
                 try:
-                    evaluate_final_eligibility(leadgen_id)
+                    # Note: This uses global domain data since business context isn't available here
+                    # The main run_agent function handles business-specific evaluation
+                    evaluate_final_eligibility(leadgen_id, None, None)
                 except Exception as e:
                     print(f"Error evaluating eligibility: {e}")
         else:
