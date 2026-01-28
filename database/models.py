@@ -26,8 +26,9 @@ def create_business_model(table_name, dynamic_base):
         __tablename__ = table_name
         id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
         name = Column(String, nullable=False)
+        subdomain = Column(String, nullable=False)
         # Map Python attribute to database column name
-        twilio_from_number = Column(String, nullable=False, name='twilio_number')
+        twilio_number = Column(String, nullable=False, name='twilio_number')
         created_at = Column(DateTime, nullable=False)
 
     return Business
@@ -53,6 +54,7 @@ def create_leads_model(table_name, dynamic_base):
         name = Column(String, nullable=True)
         email = Column(String, nullable=True)
         phone = Column(String, nullable=True)
+        status = Column(String, nullable=False, default='new')
         # Map Python attribute 'form_id' to database column 'formId' (camelCase)
         form_id = Column(String, nullable=True, name='formId')
         eligible = Column(Boolean, nullable=False, default=False)

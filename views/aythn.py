@@ -1,4 +1,3 @@
-from types import NoneType
 from langchain.memory import ConversationBufferWindowMemory
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -53,13 +52,8 @@ def load_domain_qa_data(business_id: str = None):
         import config
 
         if not config.NESTJS_BACKEND_URL:
-            print("Warning: NESTJS_BACKEND_URL not configured, falling back to local file")
-            # Fallback to local file if API URL not configured
-            try:
-                with open("domain-q&a.json", 'r', encoding='utf-8') as file:
-                    qa_data = json.load(file)
-            except FileNotFoundError:
-                return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
+            print("Warning: NESTJS_BACKEND_URL not configured")
+            return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
         else:
             # Fetch from NestJS backend API
             api_url = f"{config.NESTJS_BACKEND_URL}/questions-structure/{business_id}"
@@ -98,28 +92,39 @@ def load_domain_qa_data(business_id: str = None):
 
         def process_answers(answers_dict, question_text, level=0):
             """Recursively process answers and follow-up questions"""
+            nonlocal domains_text  # Access outer scope variable
             indent = "  " * (level + 1)
             for answer_key, answer_info in answers_dict.items():
                 response = answer_info.get("response", "")
                 next_route = answer_info.get("next_route")
                 eligible = answer_info.get("eligible", False)
+                follow_up = answer_info.get("follow_up")
 
-                domains_text = globals()['domains_text']  # Access outer variable
-                domains_text += f"{indent}- If they say '{answer_key}': Respond with \"{response}\"\n"
+                # Build instruction for domain knowledge
+                instruction = f"{indent}- If they say '{answer_key}': "
+                if response:
+                    instruction += f"Respond with \"{response}\""
+                if follow_up:
+                    follow_up_question = follow_up.get("question", "")
+                    if response:
+                        instruction += f", then ask: \"{follow_up_question}\""
+                    else:
+                        instruction += f"Ask: \"{follow_up_question}\""
+                domains_text += instruction + "\n"
 
-                # Store mapping for quick lookup
+                # Store mapping for quick lookup with follow-up question info
                 qa_mapping[answer_key.lower()] = {
                     "response": response,
-                    "next_route": next_route
+                    "next_route": next_route,
+                    "follow_up_question": follow_up.get("question", "") if follow_up else None,
+                    "follow_up_answers": follow_up.get("answers", {}) if follow_up else {}
                 }
                 # Store eligibility mapping
                 eligibility_mapping[answer_key.lower()] = eligible
 
-                # Process follow-up questions
-                follow_up = answer_info.get("follow_up")
+                # Process follow-up questions recursively
                 if follow_up:
                     follow_up_question = follow_up.get("question", "")
-                    domains_text += f"{indent}  Follow-up: {follow_up_question}\n"
                     follow_up_answers = follow_up.get("answers", {})
                     process_answers(follow_up_answers, follow_up_question, level + 1)
 
@@ -147,52 +152,18 @@ def load_domain_qa_data(business_id: str = None):
 
     except requests.RequestException as e:
         print(f"Error fetching domain Q&A data from API: {e}")
-        # Fallback to local file
-        try:
-            with open("domain-q&a.json", 'r', encoding='utf-8') as file:
-                qa_data = json.load(file)
-            print("Falling back to local domain-q&a.json file due to API error")
-            # Process the fallback data (using simplified version for backward compatibility)
-            domains_text = "DOMAIN KNOWLEDGE:\nYou have access to the following domain-specific information to help users:\n\n"
-            qa_mapping = {}
-            eligibility_mapping = {}
-            eligibility_rules = {}
-            for domain_name, domain_info in qa_data.get("domains", {}).items():
-                formatted_domain = domain_name.replace('_', ' ').title()
-                domains_text += f"{formatted_domain.upper()}:\n"
-                if "eligibility_rules" in domain_info:
-                    eligibility_rules[domain_name] = domain_info["eligibility_rules"]
-                questions = domain_info.get("questions", [])
-                for question_data in questions:
-                    question = question_data.get("question", "")
-                    domains_text += f"- {question}\n"
-                    answers = question_data.get("answers", {})
-                    for answer_key, answer_info in answers.items():
-                        response = answer_info.get("response", "")
-                        next_route = answer_info.get("next_route", "/")
-                        eligible = answer_info.get("eligible", False)
-                        domains_text += f"  - If they say '{answer_key}': Respond with \"{response}\"\n"
-                        qa_mapping[answer_key.lower()] = {
-                            "response": response,
-                            "next_route": next_route
-                        }
-                        eligibility_mapping[answer_key.lower()] = eligible
-                    domains_text += "\n"
-            global_rules = qa_data.get("global_eligibility_rules", {})
-            return domains_text, qa_mapping, eligibility_mapping, eligibility_rules, global_rules
-        except (FileNotFoundError, json.JSONDecodeError) as fallback_error:
-            print(f"Fallback also failed: {fallback_error}")
-            return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
+        return "DOMAIN KNOWLEDGE:\nNo domain-specific information available.\n\n", {}, {}, {}, {}
     except Exception as e:
         print(f"Unexpected error loading domain Q&A data: {e}")
+        import traceback
+        traceback.print_exc()
         return "DOMAIN KNOWLEDGE:\nError loading domain information.\n\n", {}, {}, {}, {}
 
 
 # PostgreSQL (PGVector) Connection
 PG_CONN_STRING = config.PG_CONN_STRING
 
-# Cache for domain Q&A data by business_id
-_domain_cache = {}
+# Cache removed - always fetch fresh domain Q&A data when conversation starts
 
 def get_business_id_for_lead(lead_id: str):
     """
@@ -230,8 +201,8 @@ def get_business_id_for_lead(lead_id: str):
 
 def get_domain_data_for_business(business_id: str):
     """
-    Get or load domain Q&A data for a specific business.
-    Uses caching to avoid repeated API calls.
+    Load domain Q&A data for a specific business.
+    Always fetches fresh data from the API (no caching).
 
     Args:
         business_id: Business ID to fetch domain data for
@@ -239,12 +210,9 @@ def get_domain_data_for_business(business_id: str):
     Returns:
         tuple: (domain_knowledge, qa_mapping, eligibility_mapping, eligibility_rules, global_eligibility_rules)
     """
-    if business_id in _domain_cache:
-        return _domain_cache[business_id]
-
-    # Load data for this business
+    # Always load fresh data for this business
+    print(f"📥 Loading fresh domain Q&A data for business {business_id}")
     data = load_domain_qa_data(business_id)
-    _domain_cache[business_id] = data
     return data
 
 
@@ -267,13 +235,18 @@ def determine_eligibility(user_input: str, conversation_history: list = None, el
 
     user_input_lower = user_input.lower().strip()
 
-    # Check if the current user input matches any eligible answer
+    # Check if the current user input matches any eligible answer (exact match first)
     if user_input_lower in current_eligibility_mapping:
         return current_eligibility_mapping[user_input_lower]
 
-    # Check for partial matches in current user input
+    # Check for partial matches using word boundaries to avoid false positives
+    # Only match if the answer_key appears as a complete word in the user input
+    import re
     for answer_key, is_eligible in current_eligibility_mapping.items():
-        if answer_key in user_input_lower or user_input_lower in answer_key:
+        # Use word boundary matching to ensure we match complete words/phrases
+        # This prevents "yes" from matching "yes, I want that" or vice versa incorrectly
+        pattern = r'\b' + re.escape(answer_key) + r'\b'
+        if re.search(pattern, user_input_lower):
             return is_eligible
     
     # If no match found and we have conversation history, check previous USER messages only
@@ -288,10 +261,19 @@ def determine_eligibility(user_input: str, conversation_history: list = None, el
                     if msg_content == "hello":
                         continue
                     # Check if any previous user message matches eligible answers
+                    # Use word boundary matching for more accurate matching
+                    import re
                     for answer_key, is_eligible in current_eligibility_mapping.items():
-                        if answer_key in msg_content or msg_content in answer_key:
+                        # Check exact match first
+                        if msg_content == answer_key:
                             if is_eligible:
                                 eligible_answers_found.append(True)
+                        # Then check word boundary match
+                        else:
+                            pattern = r'\b' + re.escape(answer_key) + r'\b'
+                            if re.search(pattern, msg_content):
+                                if is_eligible:
+                                    eligible_answers_found.append(True)
         
         # If we found at least one eligible answer from user messages, return True
         if eligible_answers_found:
@@ -350,8 +332,9 @@ def evaluate_final_eligibility(leadgen_id: str, eligibility_mapping: dict = None
         eligible_answers_found = []
         ineligible_answers_found = []
         
+        import re
         for user_msg in user_messages:
-            # Check exact matches
+            # Check exact matches first
             if user_msg in current_eligibility_mapping:
                 is_eligible = current_eligibility_mapping[user_msg]
                 if is_eligible:
@@ -359,13 +342,17 @@ def evaluate_final_eligibility(leadgen_id: str, eligibility_mapping: dict = None
                 else:
                     ineligible_answers_found.append(user_msg)
             else:
-                # Check partial matches
+                # Check partial matches using word boundaries to avoid false positives
+                matched = False
                 for answer_key, is_eligible in current_eligibility_mapping.items():
-                    if answer_key in user_msg or user_msg in answer_key:
+                    # Use word boundary matching to ensure we match complete words/phrases
+                    pattern = r'\b' + re.escape(answer_key) + r'\b'
+                    if re.search(pattern, user_msg):
                         if is_eligible:
                             eligible_answers_found.append(user_msg)
                         else:
                             ineligible_answers_found.append(user_msg)
+                        matched = True
                         break
         
         # Determine final eligibility
@@ -397,9 +384,45 @@ def evaluate_final_eligibility(leadgen_id: str, eligibility_mapping: dict = None
         return {"error": str(e)}
 
 
+def update_lead_status(leadgen_id: str, status: str):
+    """
+    Update the status of a lead in the database.
+    
+    Args:
+        leadgen_id: The Facebook leadgen_id
+        status: Status value ('new', 'in contact', 'qualified', 'not qualified')
+    """
+    session = None
+    try:
+        engine = create_engine(PG_CONN_STRING)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        
+        # Create Base and models - both must use the same Base for foreign keys to work
+        Base = declarative_base()
+        business_model = models.create_business_model('businesses', Base)
+        lead_model = models.create_leads_model('leads', Base)
+        
+        lead = session.query(lead_model).filter(lead_model.leadgen_id == leadgen_id).first()
+        if lead:
+            lead.status = status
+            session.commit()
+            print(f"Updated status for lead {leadgen_id}: {status}")
+        else:
+            print(f"Lead {leadgen_id} not found for status update")
+    except Exception as e:
+        print(f"Error updating lead status: {e}")
+        if session:
+            session.rollback()
+    finally:
+        if session:
+            session.close()
+
+
 def update_lead_eligibility(leadgen_id: str, is_eligible: bool):
     """
     Update the eligible status of a lead in the database.
+    Also updates the status field: 'qualified' if eligible, 'not qualified' if not eligible.
     
     Args:
         leadgen_id: The Facebook leadgen_id
@@ -419,8 +442,13 @@ def update_lead_eligibility(leadgen_id: str, is_eligible: bool):
         lead = session.query(lead_model).filter(lead_model.leadgen_id == leadgen_id).first()
         if lead:
             lead.eligible = is_eligible
+            # Update status based on eligibility
+            if is_eligible:
+                lead.status = 'qualified'
+            else:
+                lead.status = 'not qualified'
             session.commit()
-            print(f"Updated eligibility for lead {leadgen_id}: {is_eligible}")
+            print(f"Updated eligibility for lead {leadgen_id}: {is_eligible}, status: {lead.status}")
         else:
             print(f"Lead {leadgen_id} not found for eligibility update")
     except Exception as e:
@@ -487,9 +515,36 @@ def run_agent(user_input: str, lead_id, max_number_of_messages: int=5):
     Returns:
         str: The agent's response based on the user input.
     """
+    # Initialize message history to check if this is the start of a conversation
+    session_id = str(lead_id)
+    chat_history_table = "messages"
+    message_history = SQLChatMessageHistory(
+        session_id=session_id,
+        connection_string=PG_CONN_STRING,
+        table_name=chat_history_table,
+        custom_message_converter=MessageConverterWithDateTime(chat_history_table),
+    )
+    
+    # Check if this is the start of a conversation (no messages or only initial "Hello")
+    existing_messages = message_history.messages
+    is_conversation_start = len(existing_messages) == 0 or (
+        len(existing_messages) == 1 and 
+        hasattr(existing_messages[0], 'content') and 
+        existing_messages[0].content.lower().strip() == "hello"
+    )
+    
+    # Update lead status to "in contact" when conversation starts
+    if is_conversation_start:
+        update_lead_status(str(lead_id), 'in contact')
+        print(f"🔄 Conversation starting for lead {lead_id}. Status updated to 'in contact'.")
+    
     # Get business_id for this lead and load domain data
+    # Always fetch fresh domain questions when a new conversation starts
     business_id = get_business_id_for_lead(str(lead_id))
     if business_id:
+        if is_conversation_start:
+            print(f"🔄 Conversation starting for lead {lead_id}. Fetching fresh domain questions for business {business_id}...")
+        # Always fetch fresh data (no caching)
         domain_knowledge, qa_mapping, eligibility_mapping, eligibility_rules, global_eligibility_rules = get_domain_data_for_business(business_id)
     else:
         # Fallback to default/global domain data
@@ -528,15 +583,8 @@ def run_agent(user_input: str, lead_id, max_number_of_messages: int=5):
                 "data_deleted": False
             }
     
-    # Initialize message history with lead_id (convert to string for session_id)
-    session_id = str(lead_id)
-    chat_history_table = "messages"
-    message_history = SQLChatMessageHistory(
-        session_id=session_id,
-        connection_string=PG_CONN_STRING,
-        table_name=chat_history_table,
-        custom_message_converter=MessageConverterWithDateTime(chat_history_table),
-    )
+    # Reuse the message history that was already initialized above
+    # (message_history is already created when checking for conversation start)
 
     # Initializing buffer memory from the message history
     memory = ConversationBufferWindowMemory(
@@ -558,11 +606,17 @@ Key guidelines for your interactions:
 1. Be warm, empathetic, and conversational - like talking to a knowledgeable friend
 2. Use natural language with appropriate casual expressions and contractions
 3. Show genuine interest in the user's responses
-4. Ask follow-up questions to better understand their needs
-5. Keep responses concise but engaging - avoid overly long explanations unless needed
-6. If you don't have specific information, be honest about it and offer to help in other ways
+4. When the domain knowledge specifies a response for a user's answer, use that EXACT response
+5. After giving a response from domain knowledge, IMMEDIATELY ask the follow-up question if one is specified
+6. Keep responses concise but engaging - avoid overly long explanations unless needed
+7. If you don't have specific information, be honest about it and offer to help in other ways
 
 {domain_knowledge}
+
+IMPORTANT: When a user's input matches an answer in the domain knowledge:
+- Use the EXACT response specified in the domain knowledge
+- If a follow-up question is provided, ask it immediately after the response
+- Be conversational and natural, but follow the domain knowledge structure
 
 Remember: You're here to help and have a pleasant conversation, not just to provide robotic responses. Make the user feel heard and valued. Use the domain knowledge naturally in conversation flow.
                 """
@@ -577,20 +631,193 @@ Remember: You're here to help and have a pleasant conversation, not just to prov
 
     # Create a simple chain with memory
     chain = LLMChain(llm=chat_model, prompt=business_prompt, memory=memory)
+    
+    # Post Q&A flow prompt (normal conversation after questions end)
+    post_flow_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are Aythn, a friendly and helpful conversational AI assistant.
+
+IMPORTANT:
+- The required domain questions have been completed and you should NOT ask them again.
+- Continue with a normal helpful conversation and answer any additional questions the user has.
+                """,
+            ),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("user", "{input}"),
+        ]
+    )
+    post_chain = LLMChain(llm=chat_model, prompt=post_flow_prompt, memory=memory)
 
     # Interact with the agent
     try:
-        response = chain.invoke(input=user_input)
-        response_text = response['text']
+        # Check if user input matches any answer in qa_mapping
+        user_input_lower = user_input.lower().strip()
+        matched_answer = None
+
+        # Helper: detect if we already finished the follow-up Q&A flow for this lead
+        closing_phrase = "our team will contact you back soon on call"
+        qa_flow_completed = False
+        try:
+            # Check DB status first (if already finalized)
+            s = None
+            engine = create_engine(PG_CONN_STRING)
+            Session = sessionmaker(bind=engine)
+            s = Session()
+            Base = declarative_base()
+            lead_model = models.create_leads_model("leads", Base)
+            lead_row = s.query(lead_model).filter(lead_model.leadgen_id == str(lead_id)).first()
+            if lead_row and (lead_row.status or "").lower() in ("qualified", "not qualified"):
+                qa_flow_completed = True
+        except Exception as e:
+            print(f"Warning: could not read lead status for QA completion: {e}")
+        finally:
+            try:
+                if s:
+                    s.close()
+            except Exception:
+                pass
+        
+        # Look at the last AI message to understand which follow-up answers are expected.
+        # This prevents generic "yes/no" from matching the wrong branch.
+        prev_messages = message_history.messages if hasattr(message_history, "messages") else []
+        last_ai_content = ""
+        for msg in reversed(prev_messages[-10:]):
+            if hasattr(msg, "__class__") and "AI" in msg.__class__.__name__ and hasattr(msg, "content"):
+                last_ai_content = (msg.content or "").lower()
+                break
+
+        expected_followup_answers: set[str] = set()
+        for _, v in qa_mapping.items():
+            fu_q = (v.get("follow_up_question") or "").lower()
+            if fu_q and fu_q in last_ai_content:
+                fu_answers = v.get("follow_up_answers") or {}
+                if isinstance(fu_answers, dict):
+                    expected_followup_answers.update([str(k).lower() for k in fu_answers.keys()])
+                break
+        
+        # If we're in a follow-up step and we know the expected answers, only match those answers.
+        if expected_followup_answers:
+            if user_input_lower in expected_followup_answers and user_input_lower in qa_mapping:
+                matched_answer = qa_mapping[user_input_lower]
+            else:
+                # Don't allow generic "yes/no" to match if it's not expected for the current follow-up.
+                if user_input_lower in ("yes", "no"):
+                    matched_answer = None
+
+        # Otherwise, use normal matching.
+        if matched_answer is None:
+            # Check exact match first
+            if user_input_lower in qa_mapping:
+                matched_answer = qa_mapping[user_input_lower]
+            else:
+                # Try partial matching - check if any key in qa_mapping is contained in user input or vice versa
+                # Also check word boundaries for better matching
+                for key, value in qa_mapping.items():
+                    # Check if key is a word in user input or user input contains the key
+                    if key in user_input_lower or user_input_lower in key:
+                        matched_answer = value
+                        break
+                    # Check word boundary matching (e.g., "rent" matches "I want to rent")
+                    import re
+                    if re.search(r'\b' + re.escape(key) + r'\b', user_input_lower):
+                        matched_answer = value
+                        break
+        
+        # If Q&A flow is completed, continue normal conversation (do not ask domain questions again)
+        if qa_flow_completed:
+            response = post_chain.invoke(input=user_input)
+            response_text = response["text"]
+        else:
+            # Domain Q&A handling (including follow-ups)
+            all_followups_complete = False
+
+            if matched_answer is not None:
+                response_text = (matched_answer.get("response") or "").strip()
+                follow_up_question = matched_answer.get("follow_up_question")
+
+                # If there's a follow-up question, ask it (even if response is empty)
+                if follow_up_question:
+                    if response_text:
+                        response_text = f"{response_text} {follow_up_question}"
+                    else:
+                        response_text = follow_up_question
+                else:
+                    # No follow-up question on this answer. If we were just asking a follow-up, end the flow.
+                    followup_was_asked = False
+                    for _, v in qa_mapping.items():
+                        fu = (v.get("follow_up_question") or "").lower()
+                        if fu and fu in last_ai_content:
+                            followup_was_asked = True
+                            break
+
+                    if followup_was_asked:
+                        all_followups_complete = True
+                        response_text = (
+                            (response_text + " " if response_text else "")
+                            + "Our team will contact you back soon on call. Is there anything else you want to know?"
+                        )
+
+                # If we still have nothing to say, fall back to the LLM
+                if not response_text:
+                    response = chain.invoke(input=user_input)
+                    response_text = response["text"]
+                else:
+                    # Add the response to conversation history manually since we're bypassing the chain
+                    if hasattr(memory, "chat_memory"):
+                        memory.chat_memory.add_user_message(user_input)
+                        memory.chat_memory.add_ai_message(response_text)
+
+                # If follow-ups completed, evaluate final eligibility NOW (and status gets updated there)
+                if all_followups_complete:
+                    try:
+                        final_evaluation = evaluate_final_eligibility(str(lead_id), eligibility_mapping, global_eligibility_rules)
+                        print(f"Final eligibility evaluation completed: {final_evaluation}")
+                    except Exception as e:
+                        print(f"Error during final eligibility evaluation: {e}")
+            else:
+                # No domain match -> normal agent response
+                response = chain.invoke(input=user_input)
+                response_text = response["text"]
         
         # Get conversation history for eligibility determination
         conversation_history = memory.chat_memory.messages if hasattr(memory, 'chat_memory') else []
         
-        # Determine eligibility based on user input and conversation history
-        is_eligible = determine_eligibility(user_input, conversation_history, eligibility_mapping, global_eligibility_rules)
-        
-        # Update lead eligibility in database (real-time update)
-        update_lead_eligibility(str(lead_id), is_eligible)
+        # Only determine and update eligibility if user input matches a specific answer in domain Q&A data
+        # This prevents generic responses like "yes", "ok", "thanks" from incorrectly affecting eligibility
+        is_eligible = None
+        if matched_answer or user_input_lower in qa_mapping:
+            # User provided a specific answer from domain Q&A, check eligibility
+            is_eligible = determine_eligibility(user_input, conversation_history, eligibility_mapping, global_eligibility_rules)
+            
+            # Update lead eligibility in database (real-time update)
+            # This will also update status to 'qualified' or 'not qualified' based on eligibility
+            update_lead_eligibility(str(lead_id), is_eligible)
+            print(f"Eligibility updated for lead {lead_id}: {is_eligible} (matched answer: {matched_answer is not None or user_input_lower in qa_mapping})")
+        else:
+            # Generic response (like "yes", "ok", "thanks") - don't update eligibility
+            # Get current eligibility from database to return in response without changing it
+            session_temp = None
+            try:
+                engine_temp = create_engine(PG_CONN_STRING)
+                Session_temp = sessionmaker(bind=engine_temp)
+                session_temp = Session_temp()
+                Base_temp = declarative_base()
+                lead_model_temp = models.create_leads_model('leads', Base_temp)
+                lead_temp = session_temp.query(lead_model_temp).filter(lead_model_temp.leadgen_id == str(lead_id)).first()
+                if lead_temp:
+                    is_eligible = lead_temp.eligible if lead_temp.eligible is not None else False
+                    print(f"Generic response '{user_input}' - keeping current eligibility: {is_eligible}")
+                else:
+                    is_eligible = False
+            except Exception as e:
+                print(f"Error getting current eligibility: {e}")
+                is_eligible = False
+            finally:
+                if session_temp:
+                    session_temp.close()
         
         # Check if conversation is ending
         conversation_ending = is_conversation_ending(user_input, conversation_history)
@@ -604,19 +831,10 @@ Remember: You're here to help and have a pleasant conversation, not just to prov
             except Exception as e:
                 print(f"Error during final eligibility evaluation: {e}")
         
-        # Determine next_route based on Q&A data - match user input to find appropriate route
+        # Determine next_route based on Q&A data
         next_route = "/"  # default
-        user_input_lower = user_input.lower().strip()
-        
-        # Check if user input matches any key in qa_mapping
-        if user_input_lower in qa_mapping:
-            next_route = qa_mapping[user_input_lower]["next_route"]
-        else:
-            # Try partial matching - check if any key in qa_mapping contains the user input
-            for key, value in qa_mapping.items():
-                if user_input_lower in key or key in user_input_lower:
-                    next_route = value["next_route"]
-                    break
+        if matched_answer:
+            next_route = matched_answer.get("next_route", "/")
         
         # Return both response, next_route, and eligibility status
         return {
@@ -777,7 +995,7 @@ def get_or_create_business(twilio_from_number: str):
         
         # Try to find existing business
         business = session.query(business_model).filter(
-            business_model.twilio_from_number == clean_number
+            business_model.twilio_number == clean_number
         ).first()
         
         if business:
@@ -785,7 +1003,7 @@ def get_or_create_business(twilio_from_number: str):
         
         # Create new business if not found
         new_business = business_model(
-            twilio_from_number=clean_number,
+            twilio_number=clean_number,
             created_at=datetime.now()
         )
         session.add(new_business)
@@ -843,18 +1061,19 @@ def send_initial_greeting(leadgen_id: str, lead_name: str = None):
 def save_lead_to_db(leadgen_id: str, lead_data=None, business_id=None):
     """
     Extracts lead fields and stores them in your Leads table.
+    If a lead with the same leadgen_id already exists, returns the existing lead.
     
     Args:
         leadgen_id: The Facebook leadgen_id from the webhook (or lead_id from webhook payload)
         lead_data: Optional lead data dict with fields: full_name, email, phone, form_id, created_time
                   OR Facebook API format with field_data array
-        business_id: Optional business ID to associate lead with a business. If provided, fetches twilio_from_number from DB.
+        business_id: Optional business ID to associate lead with a business. If provided, fetches twilio_number from DB.
     
     Returns:
-        tuple: (new_lead object, leadgen_id string, lead_name, lead_email, lead_phone, twilio_from_number)
+        tuple: (lead object, leadgen_id string, lead_name, lead_email, lead_phone, twilio_number)
     """
     session = None
-    twilio_from_number = None
+    twilio_number = None
     try:
         # Extract fields from lead_data if provided
         name = None
@@ -899,7 +1118,7 @@ def save_lead_to_db(leadgen_id: str, lead_data=None, business_id=None):
         business_model = models.create_business_model('businesses', Base)
         lead_model = models.create_leads_model('leads', Base)
         
-        # Fetch business and get twilio_from_number if business_id is provided
+        # Fetch business and get twilio_number if business_id is provided
         if business_id:
             try:
                 # Convert business_id to UUID if it's a string
@@ -913,8 +1132,8 @@ def save_lead_to_db(leadgen_id: str, lead_data=None, business_id=None):
                 ).first()
                 
                 if business:
-                    twilio_from_number = business.twilio_from_number
-                    print(f"Fetched twilio_from_number '{twilio_from_number}' for business ID: {business_id}")
+                    twilio_number = business.twilio_number
+                    print(f"Fetched twilio_number '{twilio_number}' for business ID: {business_id}")
                     print(f"Associating lead {leadgen_id} with business ID: {business_id}")
                 else:
                     print(f"Warning: Business with ID {business_id} not found, saving lead without business association")
@@ -922,6 +1141,25 @@ def save_lead_to_db(leadgen_id: str, lead_data=None, business_id=None):
             except Exception as e:
                 print(f"Error fetching business: {e}")
                 business_id = None
+        
+        # Check if lead already exists
+        existing_lead = session.query(lead_model).filter(
+            lead_model.leadgen_id == str(leadgen_id)
+        ).first()
+        
+        if existing_lead:
+            print(f"Lead with leadgen_id {leadgen_id} already exists. Returning existing lead.")
+            # Update business_id if provided and different
+            if business_id and existing_lead.business_id != business_id:
+                existing_lead.business_id = business_id
+                session.commit()
+            
+            # Extract values before closing session
+            lead_name = existing_lead.name
+            lead_email = existing_lead.email
+            lead_phone = existing_lead.phone
+            
+            return existing_lead, str(leadgen_id), lead_name, lead_email, lead_phone, twilio_number
         
         # Use provided created_time or current time
         created_at = created_time if created_time else datetime.now()
@@ -947,7 +1185,7 @@ def save_lead_to_db(leadgen_id: str, lead_data=None, business_id=None):
         lead_email = new_lead.email
         lead_phone = new_lead.phone
         
-        return new_lead, str(leadgen_id), lead_name, lead_email, lead_phone, twilio_from_number
+        return new_lead, str(leadgen_id), lead_name, lead_email, lead_phone, twilio_number
     except Exception as e:
         print(f"Error saving lead: {e}")
         if session:
@@ -1328,10 +1566,9 @@ def business_twilio_from_number(business_id):
         business = session.query(business_model).filter(
             business_model.id == business_id
         ).first()
-        return business.twilio_from_number
 
         if business:
-            return business.twilio_from_number
+            return business.twilio_number
         else:
             return None
     except Exception as e:
